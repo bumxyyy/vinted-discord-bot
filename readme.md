@@ -1,6 +1,6 @@
-# Vinted Monitor: No Delay https://www.fyndit.app
+# Free Vinted Bot Monitor: No Delay https://www.fyndit.app
 
-Vinted Monitor is a bot that monitors the Vinted items route for new items and notifies users in real-time. It is designed to work with minimal delay, ensuring that users are always up-to-date with the latest items.
+The bot: Vinted Bot Monitor is a bot that monitors the Vinted items route for new items and notifies users in real-time with no-delay. It is designed to work with minimal delay, ensuring that users are always up-to-date with the latest items.
 
 <p align="center">
   <a href="https://www.fyndit.app" target="_blank" rel="noopener noreferrer">
