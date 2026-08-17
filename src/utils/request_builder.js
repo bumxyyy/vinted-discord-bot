@@ -66,11 +66,13 @@ class RequestBuilder {
         return this;
     }
 
-    // Set Next Proxy
+    // Set Next Proxy — guard against empty proxy pool (returns undefined)
     setNextProxy() {
         const proxy = ProxyManager.getNewProxy();
         if (proxy) {
             this.setProxy(proxy);
+        } else {
+            Logger.warn('setNextProxy: no proxies available — request will proceed without a proxy.');
         }
         return this;
     }

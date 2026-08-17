@@ -1,4 +1,4 @@
-import { SocksProxyAgent } from 'socks-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import Logger from './logger.js';
 import { listProxies, Proxy } from './proxies.js';
 import ConfigurationManager from './config_manager.js';
@@ -7,7 +7,7 @@ import fs from 'fs';
 const proxy_settings = ConfigurationManager.getProxiesConfig;
 
 /**
- * Static class for managing proxy settings and making HTTP requests with SOCKS authentication.
+ * Static class for managing proxy settings and making HTTP/HTTPS requests through an HTTP proxy.
  */
 class ProxyManager {
     static proxyConfig = null;
@@ -72,12 +72,13 @@ class ProxyManager {
     }
 
     /**
-     * Get a SocksProxyAgent for the given Proxy object.
+     * Get an HttpsProxyAgent for the given Proxy object.
+     * Works for both HTTP and HTTPS targets via an HTTP CONNECT tunnel.
      * @param {Proxy} proxy
-     * @returns {SocksProxyAgent}
+     * @returns {HttpsProxyAgent}
      */
     static getProxyAgent(proxy) {
-        return new SocksProxyAgent(proxy.getProxyString());
+        return new HttpsProxyAgent(proxy.getProxyString());
     }
 
     /**

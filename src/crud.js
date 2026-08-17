@@ -67,10 +67,11 @@ async function getUserByDiscordId(discordId) {
 
     if (!user) {
         await crud.createUser({ discordId });
-        user = User.findOne({ discordId }).populate('channels');
+        // await was missing here — previously returned a pending Promise object
+        user = await User.findOne({ discordId }).populate('channels');
     }
 
-    return user
+    return user;
 }
 
 /**
@@ -307,7 +308,7 @@ function parseVintedSearchParams(url) {
         }
         return searchParams;
     } catch (error) {
-        Logger.error("Invalid URL provided: ", error.message);
+        Logger.error(`Invalid URL provided: ${error.message}`);
         return null;
     }
 }
@@ -327,15 +328,28 @@ async function getAllMonitoredVintedChannelsBrandMap() {
     const brandMap = new Map();
 
     for (const channel of channels) {
-        const brands = channel.generated_filters["brand_ids"]
+        // Guard: URL parse can fail (generated_filters will be null)
+        if (!channel.generated_filters) continue;
 
+        const brands = channel.generated_filters["brand_ids"];
 
-        for (const brand of brands) {
-            
-            if (!brandMap.has(brand)) {
-                brandMap.set(brand, [channel]);
+        if (Array.isArray(brands) && brands.length > 0) {
+            // Channel has brand filter(s) — index under each brand ID
+            for (const brand of brands) {
+                if (!brandMap.has(brand)) {
+                    brandMap.set(brand, [channel]);
+                } else {
+                    brandMap.get(brand).push(channel);
+                }
+            }
+        } else {
+            // Channel has NO brand filter — store under wildcard key so that
+            // every scraped item is evaluated against it regardless of brand.
+            const WILDCARD = '__ALL__';
+            if (!brandMap.has(WILDCARD)) {
+                brandMap.set(WILDCARD, [channel]);
             } else {
-                brandMap.get(brand).push(channel);
+                brandMap.get(WILDCARD).push(channel);
             }
         }
     }

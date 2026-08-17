@@ -36,6 +36,11 @@ function parseVintedSearchParams(url) {
  */
 function matchVintedItemToSearchParams(item, searchParams, bannedKeywords, countries_codes = []) {
 
+    // item.user can be null when the Vinted API omits the seller (e.g. deleted account)
+    if (!item.user) {
+        return false;
+    }
+
     // Check blacklisted countries
     if (blacklisted_countries_codes.includes(item.user.countryCode)) {
         return false;
@@ -79,9 +84,11 @@ function matchVintedItemToSearchParams(item, searchParams, bannedKeywords, count
         }
     }
 
-    // Check catalog IDs
-    if (searchParams.catalog.length && !searchParams.catalog.some(catalogId => isSubcategory(catalogId, item.catalogId))) {
-        return false;
+    // Check catalog IDs — guard against null/undefined (parser returns null when param is absent)
+    if (Array.isArray(searchParams.catalog) && searchParams.catalog.length > 0) {
+        if (!searchParams.catalog.some(catalogId => isSubcategory(catalogId, item.catalogId))) {
+            return false;
+        }
     }
 
     if (searchParams.price_from && item.priceNumeric < searchParams.price_from) {
@@ -103,16 +110,13 @@ function matchVintedItemToSearchParams(item, searchParams, bannedKeywords, count
     ].map(([key, value]) => [key, item[value]]));
 
     for (const [key, value] of searchParamsMap) {
-        if (searchParams[key] !== undefined && searchParams[key] !== null) {
-            if (Array.isArray(searchParams[key])) {
-                if (searchParams[key].length > 0 && !searchParams[key].includes(value.toString())) {
-                    return false;
-                }
-            } else {
-                if (searchParams[key] !== value.toString()) {
-                    return false;
-                }
-            }
+        const param = searchParams[key];
+        // Skip if the search URL didn't include this filter
+        if (!Array.isArray(param) || param.length === 0) continue;
+        // Skip if the item itself has no value for this field (null/undefined)
+        if (value == null) continue;
+        if (!param.includes(value.toString())) {
+            return false;
         }
     }
 

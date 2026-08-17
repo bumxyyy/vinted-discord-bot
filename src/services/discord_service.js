@@ -1,6 +1,5 @@
 import pkg from 'discord.js';
 const { PermissionsBitField, ActionRowBuilder, ButtonBuilder, ChannelType } = pkg;
-import ProxyManager from '../utils/proxy_manager.js';
 import { ForbiddenError, NotFoundError, executeWithDetailedHandling } from '../helpers/execute_helper.js';
 import axios from 'axios';
 import Logger from '../utils/logger.js';
@@ -154,13 +153,19 @@ export async function checkVintedChannelInactivity(client) {
 }
 
 /**
- * Posts a message to a Discord channel using a SOCKS proxy.
- * @param {string} token - The bot token for authentication.
- * @param {string} channelId - The ID of the channel to post the message to.
- * @param {string} content - The content of the message to post.
- * @param {Array} embeds - An array of embed objects.
- * @param {Array} components - An array of action row objects.
- * @returns {Promise} - A promise that resolves with the response or rejects with an error.
+ * Posts a message to a Discord channel via the Discord REST API.
+ *
+ * NOTE: This function intentionally does NOT use the Vinted proxy pool.
+ * Discord API traffic must go through the native Node.js HTTPS stack.
+ * Routing it through p.webshare.io caused delivery failures and latency spikes.
+ *
+ * @param {string} token      - The bot token for authentication.
+ * @param {string} channelId  - The ID of the channel to post the message to.
+ * @param {string} content    - The text content of the message.
+ * @param {Array}  embeds     - An array of embed objects.
+ * @param {Array}  components - An array of action row objects.
+ * @param {number} [retries=3] - Number of retry attempts on transient errors.
+ * @returns {Promise<{response, body}>}
  */
 export async function postMessageToChannel(
     token,
@@ -174,53 +179,54 @@ export async function postMessageToChannel(
 
     const headers = {
         Authorization: `Bot ${token}`,
-        "Content-Type": "application/json",
-        "User-Agent": "DiscordBot (https://your-url.com, 1.0.0)",
+        'Content-Type': 'application/json',
+        'User-Agent': 'DiscordBot (https://github.com/discord/discord-api-docs, 1.0.0)',
     };
 
     Logger.debug(`Posting message to channel ${channelId}`);
 
-    const data = {
-        content,
-        embeds,
-        components,
-    };
+    const data = { content, embeds, components };
 
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
-            const proxy = await ProxyManager.getNewProxy();
-            const agent = ProxyManager.getProxyAgent(proxy);
-
-            const options = {
+            // No proxy agents — direct HTTPS to discord.com
+            const response = await axios({
                 url,
-                method: "POST",
+                method: 'POST',
                 headers,
                 data,
-                httpsAgent: agent,
-                httpAgent: agent,
-                responseType: "json",
+                responseType: 'json',
                 decompress: true,
                 maxContentLength: 10 * 1024 * 1024,
                 maxRedirects: 5,
-            };
+                timeout: 10000,
+                validateStatus: (status) => status < 500,
+            });
 
-            const response = await axios(options);
+            if (response.status === 404) throw new NotFoundError('Channel not found.');
+            if (response.status === 403) throw new ForbiddenError('Access forbidden.');
+
+            if (response.status >= 400) {
+                // 429 rate-limit or other 4xx — log and retry
+                Logger.error(`Discord API returned ${response.status} for channel ${channelId}: ${JSON.stringify(response.data).slice(0, 200)}`);
+                if (attempt < retries) {
+                    const retryAfter = response.headers['retry-after'] ? parseFloat(response.headers['retry-after']) * 1000 : 2000;
+                    Logger.debug(`Rate-limited by Discord. Waiting ${retryAfter}ms before retry ${attempt + 1}...`);
+                    await new Promise((resolve) => setTimeout(resolve, retryAfter));
+                    continue;
+                }
+                throw new Error(`Discord API error ${response.status} after ${retries + 1} attempts.`);
+            }
+
             return { response, body: response.data };
         } catch (error) {
-            const code = error.response ? error.response.status : null;
-            if (code === 404) {
-                throw new NotFoundError("Channel not found.");
-            } else if (code === 403) {
-                throw new ForbiddenError("Access forbidden.");
-            } else if (attempt < retries) {
-                Logger.debug(`Attempt ${attempt + 1} failed. Retrying...`);
-                await new Promise((resolve) => setTimeout(resolve, 300)); 
+            if (error instanceof NotFoundError || error instanceof ForbiddenError) throw error;
+
+            if (attempt < retries) {
+                Logger.error(`postMessageToChannel attempt ${attempt + 1} failed: ${error.message}. Retrying in 2s...`);
+                await new Promise((resolve) => setTimeout(resolve, 2000));
             } else {
-                throw new Error(
-                    `Error posting message after ${retries + 1} attempts: ${
-                        error.message
-                    }`
-                );
+                throw new Error(`Error posting message after ${retries + 1} attempts: ${error.message}`);
             }
         }
     }

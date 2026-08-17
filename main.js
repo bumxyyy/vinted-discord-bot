@@ -132,6 +132,9 @@ const monitorChannels = () => {
         Logger.debug('Handling item');
         const item = new VintedItem(rawItem);
 
+        // Guard: item.user can be null for deleted/anonymised sellers
+        if (!item.user) return;
+
         if (item.getNumericStars() === 0 && algorithmSettings.filter_zero_stars_profiles) {
             return;
         }
@@ -139,25 +142,47 @@ const monitorChannels = () => {
         let rawItemBrandId = item.brandId;
         rawItemBrandId = rawItemBrandId ? rawItemBrandId.toString() : null;
 
-        if (allMonitoringChannelsBrandMap.has(rawItemBrandId)) {
-            const brandChannels = allMonitoringChannelsBrandMap.get(rawItemBrandId);
-            for (const brandChannel of brandChannels) {
-                try {
-                    const user = brandChannel.user;
-                    const matchingItems = filterItemsByUrl(
-                        [item], 
-                        brandChannel.url, 
-                        brandChannel.bannedKeywords, 
-                        brandChannel.preferences.get(Preference.Countries) || []
-                    );
+        // Collect matching channels: brand-specific monitors + wildcard monitors
+        // Use a Set of channelId strings to avoid double-posting when a channel
+        // somehow appears in both buckets.
+        const seen = new Set();
+        const matchingChannels = [];
 
-                    if (matchingItems.length > 0) {
-                        sendToChannel(item, user, brandChannel);
-                    }
-                } catch(error) {
-                    Logger.debug('Error sending to channel');
-                    Logger.debug(error);
+        const addChannels = (channels) => {
+            for (const ch of channels) {
+                if (!seen.has(ch.channelId)) {
+                    seen.add(ch.channelId);
+                    matchingChannels.push(ch);
                 }
+            }
+        };
+
+        // Brand-specific channels
+        if (rawItemBrandId && allMonitoringChannelsBrandMap.has(rawItemBrandId)) {
+            addChannels(allMonitoringChannelsBrandMap.get(rawItemBrandId));
+        }
+
+        // Wildcard channels (no brand filter — monitor everything)
+        if (allMonitoringChannelsBrandMap.has('__ALL__')) {
+            addChannels(allMonitoringChannelsBrandMap.get('__ALL__'));
+        }
+
+        for (const vintedChannel of matchingChannels) {
+            try {
+                const user = vintedChannel.user;
+                const matchingItems = filterItemsByUrl(
+                    [item],
+                    vintedChannel.url,
+                    vintedChannel.bannedKeywords,
+                    vintedChannel.preferences.get(Preference.Countries) || []
+                );
+
+                if (matchingItems.length > 0) {
+                    sendToChannel(item, user, vintedChannel);
+                }
+            } catch (error) {
+                Logger.debug('Error sending to channel');
+                Logger.debug(error);
             }
         }
     };
