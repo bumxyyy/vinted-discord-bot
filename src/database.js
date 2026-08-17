@@ -27,9 +27,35 @@ function buildCategoryMap(node, parentMap = {}) {
     return parentMap;
 }
 
-// Build the category map starting from the root nodes
+// Build the category map starting from the root nodes.
+// Defensive: handles every plausible shape the Vinted API might return.
 function buildCategoryMapFromRoots(roots) {
-    roots.data.catalogs.forEach((root) => {
+    if (!roots) {
+        Logger.warn('buildCategoryMapFromRoots: received empty/undefined payload — skipping catalog tree build.');
+        return;
+    }
+
+    // Probe the most common shapes in priority order:
+    //   1. roots is already the flat array of catalog nodes
+    //   2. roots.catalogs  (raw API object)
+    //   3. roots.data.catalogs  (wrapped by executeWithDetailedHandling)
+    //   4. roots.data  (if dtos IS the array)
+    let catalogs =
+        Array.isArray(roots)              ? roots              :
+        Array.isArray(roots.catalogs)     ? roots.catalogs     :
+        Array.isArray(roots.data?.catalogs) ? roots.data.catalogs :
+        Array.isArray(roots.data)         ? roots.data         :
+        null;
+
+    if (!catalogs || catalogs.length === 0) {
+        // Log the raw keys so we can adjust the probe order in a future deploy
+        const shape = JSON.stringify(Object.keys(roots)).slice(0, 120);
+        Logger.warn(`buildCategoryMapFromRoots: no valid catalogs array found (root keys: ${shape}). Category filtering will be skipped.`);
+        return;
+    }
+
+    Logger.info(`Building category map from ${catalogs.length} root catalog(s).`);
+    catalogs.forEach((root) => {
         buildCategoryMap(root, categoryMap);
     });
 }

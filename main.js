@@ -67,22 +67,34 @@ setInterval(async () => {
 }, 60000);  // 60 seconds
 
 const getCatalogRoots = async (cookie) => {
-    let found = false;
-    while (!found) {
+    const MAX_ATTEMPTS = 3;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
-            const roots = await fetchCatalogInitializer( { cookie });
-            if (roots) {
+            const roots = await fetchCatalogInitializer({ cookie });
+
+            // roots is the executeWithDetailedHandling envelope:
+            // { success, code, data: <payload> }
+            if (roots && roots.success !== false) {
                 buildCategoryMapFromRoots(roots);
-                found = true;
                 Logger.info('Fetched catalog roots from Vinted');
+                return; // success — exit
             }
+
+            Logger.warn(`getCatalogRoots: attempt ${attempt}/${MAX_ATTEMPTS} — response not successful (code: ${roots?.code})`);
         } catch (error) {
-            Logger.debug('Error fetching catalog roots');
-            console.error(error);
-            await new Promise(resolve => setTimeout(resolve, 200));
+            Logger.error(`getCatalogRoots: attempt ${attempt}/${MAX_ATTEMPTS} failed — ${error.message}`);
+        }
+
+        if (attempt < MAX_ATTEMPTS) {
+            Logger.debug(`Retrying catalog roots in 5s...`);
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
-}
+
+    // All attempts failed — catalog filtering will be skipped but monitoring continues.
+    Logger.warn('getCatalogRoots: all attempts failed. Catalog ID filtering will be disabled. Monitoring will start anyway.');
+};
 
 Logger.info('Fetching catalog roots from Vinted');
 
