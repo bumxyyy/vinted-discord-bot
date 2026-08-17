@@ -40,13 +40,12 @@ const refreshCookie = async () => {
                 return cookie;
             }
         } catch (error) {
-            Logger.debug('Error fetching cookie');
-            await new Promise(resolve => setTimeout(resolve, 200));
+            Logger.error(`Error fetching cookie: ${error.message || error}`);
+            // Wait 5 s before retrying to avoid hammering Vinted / the proxy
+            // with a tight loop when the session handshake is failing.
+            Logger.debug('Waiting 5s before retrying cookie fetch...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
-
-        setTimeout(() => {
-            Logger.debug('Retrying to fetch cookie');
-        }, 1000);
     }
 };
 
@@ -170,7 +169,10 @@ const monitorChannels = () => {
             try {
                 await CatalogService.fetchUntilCurrentAutomatic(cookie, handleItem);
             } catch (error) {
-                console.error(error);
+                Logger.error(`Monitoring loop error: ${error.message || error}`);
+                // Sleep before the next iteration to prevent a tight error loop
+                // from flooding the proxy / Vinted API with dozens of requests/s.
+                await new Promise(resolve => setTimeout(resolve, 2500));
             }
         }
     })();

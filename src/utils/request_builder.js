@@ -141,10 +141,14 @@ class RequestBuilder {
             // already accepted all < 500 responses. So here we know the proxy
             // itself failed to connect — it is safe to temporarily remove it.
 
-            const status  = error.response?.status;   // may be undefined for pure network errors
-            const message = error.message || 'unknown network error';
-
-            Logger.debug(`Network error on request to ${this.url}: ${message}${status ? ` (HTTP ${status})` : ''}`);
+            if (error.response) {
+                // Unexpected HTTP 5xx — log status and a slice of the body for diagnosis
+                const bodySnippet = JSON.stringify(error.response.data || '').slice(0, 200);
+                Logger.error(`Request to ${this.url} failed — Status: ${error.response.status} - Data: ${bodySnippet}`);
+            } else {
+                // Pure transport / socket failure — log the error code or message
+                Logger.error(`Request to ${this.url} failed — Network Error: ${error.code || error.message}`);
+            }
 
             // Only remove the proxy when the error is clearly a network / transport
             // failure (no response at all), not for an application-level error.
