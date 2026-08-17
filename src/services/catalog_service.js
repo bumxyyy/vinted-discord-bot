@@ -34,18 +34,35 @@ function initializeConcurrency( concurrent_requests ) {
 
 /**
  * Find the highest item ID in the catalog.
+ *
  * @param {string} cookie - Cookie for authentication.
- * @returns {Promise<Object>} - Promise resolving to the highest item ID.
+ * @returns {Promise<{highestID: number}>}
  */
 async function findHighestID(cookie) {
-    const response = await fetchCatalogItems({ cookie });
+    const response = await fetchCatalogItems({ cookie, per_page: 1, order: 'newest_first' });
 
-    if (!response.items) {
-        throw new Error("Error fetching catalog items.");
+    // response is the executeWithDetailedHandling envelope: { success, code, items }
+    const items = response?.items;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        // Log what we actually got to help diagnose API shape changes
+        const keys = response ? Object.keys(response).join(', ') : 'null';
+        throw new Error(`findHighestID: no items in response (envelope keys: ${keys})`);
     }
 
-    const maxID = Math.max(...response.items.map(item => parseInt(item.id)));
-    return { highestID: maxID };
+    // Vinted uses 'id' in most responses; guard against 'item_id' variants
+    const rawId = items[0].id ?? items[0].item_id;
+    if (!rawId) {
+        const itemKeys = Object.keys(items[0]).join(', ');
+        throw new Error(`findHighestID: item has no id field (item keys: ${itemKeys})`);
+    }
+
+    const highestID = parseInt(rawId, 10);
+    if (isNaN(highestID) || highestID <= 0) {
+        throw new Error(`findHighestID: parsed ID is invalid: ${rawId}`);
+    }
+
+    return { highestID };
 }
 
 /**
@@ -311,28 +328,41 @@ function updateFetchedRange(itemID) {
 
 
 /**
- * Find the highest item ID until successful.
+ * Find the highest item ID, retrying up to MAX_ATTEMPTS times with backoff.
+ * If all attempts fail, currentID is left at 0 so the monitoring loop can
+ * start from the current moment rather than blocking the entire bot forever.
  *
  * @param {string} cookie - Cookie for authentication.
- * @returns {Promise<void>} - Promise resolving when highest ID is found.
+ * @returns {Promise<void>}
  */
 async function findHighestIDUntilSuccessful(cookie) {
-    // Loop until the highest ID is found
-    while (currentID === 0) {
+    const MAX_ATTEMPTS = 10;
+    const RETRY_DELAY_MS = 3000;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
-            // Fetch the highest ID
             const response = await findHighestID(cookie);
-            
-            // If the highest ID is found, update the current ID and log the value
-            if (response.highestID) {
+
+            if (response.highestID && response.highestID > 0) {
                 currentID = response.highestID;
-                Logger.info(`Highest ID: ${currentID}`);
+                Logger.info(`Highest item ID found: ${currentID} (attempt ${attempt}/${MAX_ATTEMPTS})`);
+                return; // success
             }
+
+            Logger.warn(`findHighestIDUntilSuccessful: attempt ${attempt}/${MAX_ATTEMPTS} — ID was 0 or missing.`);
         } catch (error) {
-            // If an error occurs, log a message and retry
-            Logger.error("Error fetching highest ID, retrying...");
+            Logger.error(`findHighestIDUntilSuccessful: attempt ${attempt}/${MAX_ATTEMPTS} failed — ${error.message}`);
+        }
+
+        if (attempt < MAX_ATTEMPTS) {
+            Logger.debug(`Retrying highest ID in ${RETRY_DELAY_MS / 1000}s...`);
+            await delay(RETRY_DELAY_MS);
         }
     }
+
+    // Fallback: start from 0 so the monitoring loop isn't permanently blocked
+    Logger.warn(`findHighestIDUntilSuccessful: all ${MAX_ATTEMPTS} attempts failed. Starting monitor from ID 0 (will pick up live items as they appear).`);
+    currentID = 0;
 }
 
 /**
