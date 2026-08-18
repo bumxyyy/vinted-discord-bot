@@ -184,6 +184,7 @@ export async function postMessageToChannel(
     };
 
     Logger.debug(`Posting message to channel ${channelId}`);
+    console.log(`[DISCORD DEBUG] Attempting to send message to Channel ID: ${channelId}`);
 
     const data = { content, embeds, components };
 
@@ -218,8 +219,10 @@ export async function postMessageToChannel(
                 throw new Error(`Discord API error ${response.status} after ${retries + 1} attempts.`);
             }
 
+            console.log(`[DISCORD DEBUG] Successfully sent message to Channel ID: ${channelId}`);
             return { response, body: response.data };
         } catch (error) {
+            console.error(`[DISCORD DEBUG ERROR] Failed to send to ${channelId}:`, error.message, error.stack);
             if (error instanceof NotFoundError || error instanceof ForbiddenError) throw error;
 
             if (attempt < retries) {

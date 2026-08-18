@@ -293,8 +293,17 @@ class VintedScraper {
             };
 
             try {
+                console.log(`[SCRAPER DEBUG] Requesting: ${url}`);
                 const response = await this.client(config);
                 await this.saveResponseCookies(url, response);
+
+                const items = Array.isArray(response.data?.items) ? response.data.items : (Array.isArray(response.data?.data) ? response.data.data : []);
+                console.log(`[SCRAPER DEBUG] Status: ${response.status}, Received items count: ${items.length}`);
+                if (items.length > 0) {
+                    const top = items[0];
+                    const priceVal = top.price?.amount || top.price_numeric || top.price || 'N/A';
+                    console.log(`[SCRAPER DEBUG] Top item: ID=${top.id}, Title="${top.title}", Price=${priceVal}`);
+                }
 
                 if (response.status === 401 || response.status === 403) {
                     Logger.warn(`[WARN]: Received ${response.status} from Vinted for ${url}. Re-warming session...`);

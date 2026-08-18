@@ -179,6 +179,8 @@ const monitorChannels = () => {
             addChannels(allMonitoringChannelsBrandMap.get('__ALL__'));
         }
 
+        console.log(`[FILTER DEBUG] Checking item ${item.id} against ${allMonitoringChannels.length} active channel(s)`);
+
         for (const vintedChannel of matchingChannels) {
             try {
                 const user = vintedChannel.user;
@@ -186,7 +188,8 @@ const monitorChannels = () => {
                     [item],
                     vintedChannel.url,
                     vintedChannel.bannedKeywords,
-                    vintedChannel.preferences.get(Preference.Countries) || []
+                    vintedChannel.preferences.get(Preference.Countries) || [],
+                    vintedChannel.channelId
                 );
 
                 if (matchingItems.length > 0) {

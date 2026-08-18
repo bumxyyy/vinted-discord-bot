@@ -124,9 +124,23 @@ function matchVintedItemToSearchParams(item, searchParams, bannedKeywords, count
     return true;
 }
 
-export function filterItemsByUrl(items, url, bannedKeywords, countries_codes = []) {
+export function filterItemsByUrl(items, url, bannedKeywords, countries_codes = [], channelId = 'unknown') {
     const searchParams = parseVintedSearchParams(url);
     if (!searchParams) return [];
 
-    return items.filter(item => matchVintedItemToSearchParams(item, searchParams, bannedKeywords, countries_codes));
+    return items.filter(item => {
+        let brandMatch = true;
+        if (Array.isArray(searchParams.brand_ids) && searchParams.brand_ids.length > 0) {
+            brandMatch = searchParams.brand_ids.includes(item.brandId?.toString());
+        }
+
+        let priceMatch = true;
+        if (searchParams.price_from && item.priceNumeric < searchParams.price_from) priceMatch = false;
+        if (searchParams.price_to && item.priceNumeric > searchParams.price_to) priceMatch = false;
+
+        const isMatch = matchVintedItemToSearchParams(item, searchParams, bannedKeywords, countries_codes);
+
+        console.log(`[FILTER DEBUG] Channel: ${channelId} | Brand match: ${brandMatch} | Price match: ${priceMatch} | Final Verdict: ${isMatch}`);
+        return isMatch;
+    });
 }

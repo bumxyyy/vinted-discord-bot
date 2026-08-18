@@ -214,6 +214,15 @@ async function fetchAndHandleItemSafe(cookie, itemID, callback) {
 
     // If the item was successfully fetched
     if (response.item) {
+        const fetchedId = response.item.id || itemID;
+        const highestId = idTimeSinceLastPublication || currentID;
+
+        if (fetchedId <= highestId && idTimeSinceLastPublication > 0) {
+            console.log(`[MONITOR DEBUG] Skipping item ${fetchedId} (Not newer than highestId ${highestId})`);
+        } else {
+            console.log(`[MONITOR DEBUG] Highest recorded ID: ${highestId}, Current item ID: ${fetchedId}`);
+        }
+
         // Call the callback function with the fetched item
         callback(response.item);
 
