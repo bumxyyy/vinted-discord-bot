@@ -1,9 +1,6 @@
 import { executeWithDetailedHandling } from "../helpers/execute_helper.js";
-import RequestBuilder from "../utils/request_builder.js";   
-import ConfigurationManager from "../utils/config_manager.js";
+import vintedScraper from "../services/vinted_scraper.js";
 import { NotFoundError, ForbiddenError, RateLimitError } from "../helpers/execute_helper.js";
-
-const extension = ConfigurationManager.getAlgorithmSetting.vinted_api_domain_extension
 
 /**
  * Handle errors during item fetching based on response code.
@@ -19,30 +16,25 @@ function handleFetchItemError(code) {
         case 429:
             throw new RateLimitError("Rate limit exceeded.");
         default:
-            throw new Error("Error fetching item.");
+            throw new Error(`Error fetching item (HTTP ${code}).`);
     }
 }
 
 /**
- * Fetch a specific item by ID from Vinted.
+ * Fetch a specific item by ID from Vinted using VintedScraper.
  * @param {Object} params - Parameters for fetching an item.
- * @param {string} params.cookie - Cookie for authentication.
  * @param {number} params.item_id - ID of the item to fetch.
  * @returns {Promise<Object>} - Promise resolving to the fetched item.
  */
-export async function fetchItem({ cookie, item_id }) {
+export async function fetchItem({ item_id }) {
     return await executeWithDetailedHandling(async () => {
-        const url = `https://www.vinted.${extension}/api/v2/items/${item_id}`;
-
-        const response = await RequestBuilder.get(url)
-                        .setNextProxy()
-                        .setCookie(cookie)
-                        .send();
+        const response = await vintedScraper.fetchItem(item_id);
 
         if (!response.success) {
-            handleFetchItemError(response.code);
+            handleFetchItemError(response.status);
         }
 
-        return { item: response.data.item };
+        const item = response.data?.item || response.data;
+        return { item };
     });
 }
