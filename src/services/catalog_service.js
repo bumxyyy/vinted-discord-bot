@@ -1,6 +1,12 @@
 import Logger from "../utils/logger.js";
 import { fetchCatalogItems } from "../api/fetchCatalogItems.js";
 import { fetchItem } from "../api/fetchItem.js";
+import vintedScraper from "./vinted_scraper.js";
+import { VintedItem } from "../entities/vinted_item.js";
+import { filterItemsByUrl } from "./url_service.js";
+import { Preference } from "../database.js";
+import crud from "../crud.js";
+import { createVintedItemEmbed, createVintedItemActionRow } from "../bot/components/item_embed.js";
 
 /**
  * Manage concurrency and fetching logic.
@@ -27,9 +33,94 @@ let currentID = 0;
 
 let concurrency = 0;
 
+let isMonitoringLoopRunning = false;
+
 function initializeConcurrency( concurrent_requests ) {
     concurrency = concurrent_requests
     computedConcurrency = concurrency;
+}
+
+/**
+ * Explicitly trigger / ensure live background monitoring loop.
+ * @param {Client} discordClient - The Discord client instance.
+ */
+async function startMonitoring(discordClient) {
+    if (isMonitoringLoopRunning) {
+        console.log('[MONITOR] startMonitoring called — background worker loop is already active.');
+        return;
+    }
+    isMonitoringLoopRunning = true;
+    console.log('[MONITOR DEBUG] startMonitoring() function entered.');
+    console.log('[MONITOR] Starting continuous background polling worker loop...');
+
+    (async () => {
+        while (isMonitoringLoopRunning) {
+            try {
+                const activeChannels = await crud.getAllMonitoredVintedChannels();
+                console.log(`[POLLING TICK] Polling Vinted catalog for ${activeChannels.length} active channels...`);
+
+                if (!activeChannels || activeChannels.length === 0) {
+                    console.warn('[MONITOR DEBUG] Aborting tick: No monitored channels found in MongoDB.');
+                } else {
+                    const response = await vintedScraper.fetchCatalogItems({ per_page: 20, order: 'newest_first' });
+                    const rawItems = response?.data?.items || response?.data?.data || (Array.isArray(response?.data) ? response.data : []);
+
+                    if (Array.isArray(rawItems) && rawItems.length > 0) {
+                        for (const rawItem of rawItems) {
+                            const item = new VintedItem(rawItem);
+                            if (!item.user) continue;
+
+                            const isNew = processDeduplication(item.id);
+                            if (!isNew) continue;
+
+                            console.log(`[FILTER DEBUG] Checking item ${item.id} against ${activeChannels.length} active channel(s)`);
+
+                            for (const vintedChannel of activeChannels) {
+                                try {
+                                    const matchingItems = filterItemsByUrl(
+                                        [item],
+                                        vintedChannel.url,
+                                        vintedChannel.bannedKeywords,
+                                        vintedChannel.preferences?.get?.(Preference.Countries) || [],
+                                        vintedChannel.channelId
+                                    );
+
+                                    if (matchingItems.length > 0 && discordClient) {
+                                        const domain = vintedChannel.url?.match(/vinted\.(.*?)\//)?.[1] || 'it';
+                                        const { embed, photosEmbeds } = await createVintedItemEmbed(item, domain);
+                                        const actionRow = await createVintedItemActionRow(item, domain);
+
+                                        console.log(`[DISCORD DEBUG] Attempting to send message to Channel ID: ${vintedChannel.channelId}`);
+                                        const channelObj = await discordClient.channels.fetch(vintedChannel.channelId).catch(() => null);
+
+                                        if (channelObj) {
+                                            const doMentionUser = vintedChannel.user && vintedChannel.preferences?.get?.(Preference.Mention);
+                                            const mentionString = doMentionUser ? `<@${vintedChannel.user.discordId}> ` : '';
+                                            await channelObj.send({
+                                                content: mentionString,
+                                                embeds: [embed, ...photosEmbeds],
+                                                components: [actionRow]
+                                            });
+                                            console.log(`[DISCORD DEBUG] Successfully sent message to Channel ID: ${vintedChannel.channelId}`);
+                                        } else {
+                                            console.error(`[DISCORD DEBUG ERROR] Failed to send to ${vintedChannel.channelId}: Channel object not found on Discord client.`);
+                                        }
+                                    }
+                                } catch (err) {
+                                    console.error(`[DISCORD DEBUG ERROR] Failed to send to ${vintedChannel.channelId}:`, err.message, err.stack);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error(`[POLLING ERROR] Error during polling tick: ${error.message}`);
+            }
+
+            // Sleep 2.5 seconds between polling ticks
+            await delay(2500);
+        }
+    })();
 }
 
 /**
@@ -430,6 +521,7 @@ const CatalogService = {
     initializeConcurrency,
     fetchUntilCurrentAutomatic,
     findHighestIDUntilSuccessful,
+    startMonitoring,
 };
 
 export default CatalogService;

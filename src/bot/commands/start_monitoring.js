@@ -4,6 +4,7 @@ import crud from '../../crud.js';
 import t from '../../t.js';
 import Logger from '../../utils/logger.js';
 import { Preference, ShippableMap } from '../../database.js';
+import CatalogService from '../../services/catalog_service.js';
 
 export const data = new SlashCommandBuilder()
     .setName('start_monitoring')
@@ -136,6 +137,12 @@ export async function execute(interaction) {
         // Update the VintedChannel with the provided URL (if any) and set isMonitoring to true
         await crud.startVintedChannelMonitoring(vintedChannel._id, url);
         console.log(`[COMMAND DEBUG] Successfully started monitoring for Channel ID: ${channelId}`);
+
+        // Explicitly trigger the background scraping worker
+        if (typeof CatalogService.startMonitoring === 'function') {
+            console.log(`[MONITOR] Starting live loop for channel ${channelId}`);
+            CatalogService.startMonitoring(interaction.client);
+        }
     } catch (error) {
         console.error('[COMMAND DEBUG ERROR] Error starting monitoring session:', error.message, error.stack);
         await sendErrorEmbed(interaction, 'There was an error starting the monitoring session.');

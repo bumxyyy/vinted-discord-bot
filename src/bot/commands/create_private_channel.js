@@ -20,6 +20,14 @@ export async function execute(interaction) {
         const l = interaction.locale;
         await sendWaitingEmbed(interaction, t(l, 'creating-private-channel'));
 
+        const discordConfig = ConfigurationManager.getDiscordConfig;
+        const guildId = discordConfig.guild_id || process.env.DISCORD_GUILD_ID;
+        const guild = interaction.guild || (guildId ? await interaction.client.guilds.fetch(guildId).catch(() => null) : null);
+
+        if (!guild || !guild.channels) {
+            throw new Error("Could not resolve Discord Guild or Guild channels manager.");
+        }
+
         const baseCategoryName = 'Private Channels';
         const channelName = interaction.options.getString('channel_name');
 
@@ -41,7 +49,7 @@ export async function execute(interaction) {
         }
 
         // Find or create an appropriate category
-        let category = await findOrCreateCategory(interaction.guild.channels, baseCategoryName);
+        let category = await findOrCreateCategory(guild.channels, baseCategoryName);
 
         // Create the private channel
         const privateChannel = await createPrivateThread(category, channelName, discordId);
@@ -70,8 +78,10 @@ export async function execute(interaction) {
         await interaction.editReply({ embeds: [embed] });
 
         // Send a message in the private channel
-        const privateChannelObj = await interaction.guild.channels.cache.get(channelId);
-        await privateChannelObj.send(t(l, 'private-channel-welcome', { user: `<@${discordId}>` }));
+        const privateChannelObj = await guild.channels.fetch(channelId).catch(() => null);
+        if (privateChannelObj) {
+            await privateChannelObj.send(t(l, 'private-channel-welcome', { user: `<@${discordId}>` }));
+        }
     } catch (error) {
         console.error('Error creating private channel:', error);
         await sendErrorEmbed(interaction, 'There was an error creating the private channel: ```' + error + '```');
