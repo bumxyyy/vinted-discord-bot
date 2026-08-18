@@ -35,11 +35,6 @@ function buildCategoryMapFromRoots(roots) {
         return;
     }
 
-    // Probe the most common shapes in priority order:
-    //   1. roots is already the flat array of catalog nodes
-    //   2. roots.catalogs  (raw API object)
-    //   3. roots.data.catalogs  (wrapped by executeWithDetailedHandling)
-    //   4. roots.data  (if dtos IS the array)
     let catalogs =
         Array.isArray(roots)              ? roots              :
         Array.isArray(roots.catalogs)     ? roots.catalogs     :
@@ -48,7 +43,6 @@ function buildCategoryMapFromRoots(roots) {
         null;
 
     if (!catalogs || catalogs.length === 0) {
-        // Log the raw keys so we can adjust the probe order in a future deploy
         const shape = JSON.stringify(Object.keys(roots)).slice(0, 120);
         Logger.warn(`buildCategoryMapFromRoots: no valid catalogs array found (root keys: ${shape}). Category filtering will be skipped.`);
         return;
@@ -74,7 +68,6 @@ mongoose.connect(mongoConfig.uri)
     .then(() => Logger.info("Connected to MongoDB."))
     .catch((err) => Logger.error(err));
 
-    // const preferencesEnum
 const Preference = {
     Countries: "countries",
     Language: "language",
@@ -107,7 +100,7 @@ const ShippableMap = {
     "uk": [],
 };
 
-// Define your schemas
+// Define schemas
 const userSchema = new Schema({
     discordId: { type: String, unique: true, required: true },
     channels: [{ type: Types.ObjectId, ref: 'VintedChannel' }],
@@ -116,17 +109,13 @@ const userSchema = new Schema({
     preferences: { type: Map, default: {} },
 });
 
-/*const groupSchema = new Schema({
-    name: { type: String, unique: true, required: true },
-    users: [{ type: Types.ObjectId, ref: 'User' }],
-});*/
-
 const vintedChannelSchema = new Schema({
     channelId: { type: String, unique: true, required: true },
     lastUpdated: { type: Date, default: Date.now },
     keepMessageSent: { type: Boolean, default: false },
     name: { type: String, required: false },
     url: { type: String, default: null },
+    webhookUrl: { type: String, default: null },
     bannedKeywords: { type: [String], default: [] },
     isMonitoring: { type: Boolean, default: true },
     type: { type: String, default: 'public' },
@@ -135,7 +124,6 @@ const vintedChannelSchema = new Schema({
 });
 
 // Create models
-//const Group = model('Group', groupSchema);
 const User = model('User', userSchema);
 const VintedChannel = model('VintedChannel', vintedChannelSchema);
 

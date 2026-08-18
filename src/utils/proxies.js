@@ -21,6 +21,9 @@ export class Proxy {
      * Example: http://user:pass@p.webshare.io:80
      */
     getProxyString() {
+        if (!this.username && !this.password) {
+            return `${this.method}://${this.ip}:${this.port}`;
+        }
         const user = encodeURIComponent(this.username);
         const pass = encodeURIComponent(this.password);
         return `${this.method}://${user}:${pass}@${this.ip}:${this.port}`;

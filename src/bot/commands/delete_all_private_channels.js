@@ -30,9 +30,13 @@ export async function execute(interaction) {
             return;
         }
 
+        const guild = interaction.guild 
+            || (interaction.client ? interaction.client.guilds.cache.get(interaction.guildId) : null)
+            || (interaction.guildId ? await interaction.client.guilds.fetch(interaction.guildId).catch(() => null) : null);
+
         // Loop through each private channel and delete it with a delay
         for (const channel of channels) {
-            const discordChannel = interaction.guild.channels.cache.get(channel.channelId);
+            const discordChannel = guild?.channels?.cache?.get(channel.channelId);
 
             // Delete the VintedChannel from the database
             await crud.deleteVintedChannelByChannelId(channel.channelId);

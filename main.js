@@ -66,40 +66,6 @@ setInterval(async () => {
     }
 }, 60000);  // 60 seconds
 
-const getCatalogRoots = async (cookie) => {
-    const MAX_ATTEMPTS = 3;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        try {
-            const roots = await fetchCatalogInitializer({ cookie });
-
-            // roots is the executeWithDetailedHandling envelope:
-            // { success, code, data: <payload> }
-            if (roots && roots.success !== false) {
-                buildCategoryMapFromRoots(roots);
-                Logger.info('Fetched catalog roots from Vinted');
-                return; // success — exit
-            }
-
-            Logger.warn(`getCatalogRoots: attempt ${attempt}/${MAX_ATTEMPTS} — response not successful (code: ${roots?.code})`);
-        } catch (error) {
-            Logger.error(`getCatalogRoots: attempt ${attempt}/${MAX_ATTEMPTS} failed — ${error.message}`);
-        }
-
-        if (attempt < MAX_ATTEMPTS) {
-            Logger.debug(`Retrying catalog roots in 5s...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-        }
-    }
-
-    // All attempts failed — catalog filtering will be skipped but monitoring continues.
-    Logger.warn('getCatalogRoots: all attempts failed. Catalog ID filtering will be disabled. Monitoring will start anyway.');
-};
-
-Logger.info('Fetching catalog roots from Vinted');
-
-await getCatalogRoots(cookie);
-
 const sendToChannel = async (item, user, vintedChannel) => {
     // get the domain from the URL between vinted. and the next /
     const domain = vintedChannel.url.match(/vinted\.(.*?)\//)[1];
@@ -136,12 +102,9 @@ Logger.info(`Monitoring ${allMonitoringChannels.length} Vinted channels`);
 crud.eventEmitter.on('updated', async () => {
     allMonitoringChannels = await crud.getAllMonitoredVintedChannels();
     allMonitoringChannelsBrandMap = await crud.getAllMonitoredVintedChannelsBrandMap();
-    Logger.debug('Updated vinted channels');
-    console.log(`[MONITOR DEBUG] Updated active channel map. Total active channels: ${allMonitoringChannels.length}`);
 });
 
 const monitorChannels = () => {
-    console.log('[MONITOR DEBUG] startMonitoring() / monitorChannels() function entered.');
     CatalogService.startMonitoring(client);
 };
 

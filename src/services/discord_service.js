@@ -34,28 +34,66 @@ export async function createPrivateThread(
   threadName,
   discordId = null,
 ) {
-  // Get the channel in which to create the thread
-  const channel = await category.guild.channels.fetch(thread_channel_id);
-  if (!channel) throw new Error("Le channel spécifié est introuvable.");
+  const guild = category?.guild;
+  if (!guild) throw new Error("Guild non trovata.");
 
-  // Create the thread
-  const thread = await channel.threads.create({
-    name: threadName,
-    type: ChannelType.PrivateThread,
-    reason: "...",
-  });
-
-  // if the user is specified, add them to the thread
-  if (discordId) {
-    try {
-      const member = await category.guild.members.fetch(discordId);
-      await thread.members.add(member.id);
-    } catch (error) {
-      console.error("Erreur lors de l'ajout du membre au fil :", error);
-    }
+  // Try thread_channel_id if configured
+  let parentChannel = null;
+  if (thread_channel_id) {
+    parentChannel = await guild.channels.fetch(thread_channel_id).catch(() => null);
   }
 
-  return thread;
+  // If parent channel exists and has threads manager, create private thread
+  if (parentChannel && parentChannel.threads && typeof parentChannel.threads.create === 'function') {
+    const thread = await parentChannel.threads.create({
+      name: threadName,
+      type: ChannelType.PrivateThread,
+      reason: "Private monitoring thread",
+    });
+
+    if (discordId) {
+      try {
+        const member = await guild.members.fetch(discordId).catch(() => null);
+        if (member) {
+          await thread.members.add(member.id);
+        }
+      } catch (error) {
+        Logger.error(`Erreur lors de l'ajout du membre au fil: ${error.message}`);
+      }
+    }
+
+    return thread;
+  }
+
+  // Fallback: Create a private text channel inside the Category
+  const permissionOverwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionsBitField.Flags.ViewChannel]
+    }
+  ];
+
+  if (discordId) {
+    permissionOverwrites.push({
+      id: discordId,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory
+      ]
+    });
+  }
+
+  const categoryId = typeof category === 'string' ? category : category?.id;
+
+  const channel = await guild.channels.create({
+    name: threadName,
+    type: ChannelType.GuildText,
+    parent: categoryId,
+    permissionOverwrites
+  });
+
+  return channel;
 }
 
 // Helper function to calculate the time difference in hours
@@ -131,7 +169,7 @@ export async function checkVintedChannelInactivity(client) {
                         await interaction.reply({ content: t(user.locale, 'channel-deleted'), ephemeral: true });
 
                         // Delete the channel if it still exists
-                        const discordChannel = client.guilds.cache.get(guild_id).channels.cache.get(channelId);
+                        const discordChannel = await client.channels.fetch(channelId).catch(() => null);
                         if (discordChannel) {
                             await discordChannel.delete();
                         }

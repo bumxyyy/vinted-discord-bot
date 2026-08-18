@@ -2,23 +2,47 @@ import { URL } from 'url';
 import Logger from '../utils/logger.js';
 import { isSubcategory } from '../database.js';
 import ConfigurationManager from '../utils/config_manager.js';
-import Fuse from 'fuse.js'; // Import Fuse.js
+import Fuse from 'fuse.js';
 
-const blacklisted_countries_codes = ConfigurationManager.getAlgorithmSetting.blacklisted_countries_codes;
+const blacklisted_countries_codes = ConfigurationManager.getAlgorithmSetting.blacklisted_countries_codes || [];
 
-function parseVintedSearchParams(url) {
+export function parseVintedSearchParams(url) {
     try {
         const searchParams = {};
         const params = new URL(url).searchParams;
-        const paramsKeys = ['search_text', 'order', 'catalog[]', 'brand_ids[]', 'video_game_platform_ids[]', 'size_ids[]', 'price_from', 'price_to', 'status_ids[]', 'material_ids[]', 'color_ids[]'];
+        const paramsKeys = [
+            'search_text',
+            'order',
+            'catalog[]',
+            'catalog_ids[]',
+            'brand_ids[]',
+            'video_game_platform_ids[]',
+            'size_ids[]',
+            'price_from',
+            'price_to',
+            'status_ids[]',
+            'material_ids[]',
+            'color_ids[]'
+        ];
+
         for (const key of paramsKeys) {
             const isMultiple = key.endsWith('[]');
+            const cleanKey = key.replace('[]', '');
             if (isMultiple) {
-                searchParams[key.replace('[]', '')] = params.getAll(key) || null;
+                const values = params.getAll(key);
+                if (values && values.length > 0) {
+                    searchParams[cleanKey] = searchParams[cleanKey] ? searchParams[cleanKey].concat(values) : values;
+                }
             } else {
-                searchParams[key] = params.get(key) || null;
+                searchParams[cleanKey] = params.get(key) || null;
             }
         }
+
+        // Support catalog_ids alias for catalog
+        if (searchParams.catalog_ids && !searchParams.catalog) {
+            searchParams.catalog = searchParams.catalog_ids;
+        }
+
         return searchParams;
     } catch (error) {
         Logger.error("Invalid URL provided: ", error.message);
@@ -27,120 +51,132 @@ function parseVintedSearchParams(url) {
 }
 
 /**
- * Checks if a Vinted item matches the given search parameters and country codes, using fuzzy search.
- *
- * @param {Object} item - The Vinted item to check.
- * @param {Object} searchParams - The search parameters to match against the item.
- * @param {Array} [countries_codes=[]] - The country codes to check against the item's user country code.
- * @return {boolean} Returns true if the item matches all the search parameters and country codes, false otherwise.
+ * Checks if a Vinted item matches the given search parameters and country codes.
  */
-function matchVintedItemToSearchParams(item, searchParams, bannedKeywords, countries_codes = []) {
-
-    // item.user can be null when the Vinted API omits the seller (e.g. deleted account)
-    if (!item.user) {
+function matchVintedItemToSearchParams(item, searchParams, bannedKeywords = [], countries_codes = [], channelId = 'unknown') {
+    if (!item || !item.user) {
         return false;
     }
 
-    // Check blacklisted countries
-    if (blacklisted_countries_codes.includes(item.user.countryCode)) {
-        return false;
-    }
+    // Catalog items from Vinted API (/api/v2/catalog/items) NEVER include user country data.
+    // Force countryAllowed to true so listings are never discarded.
+    let countryAllowed = true;
 
-    // Check country codes
-    if (countries_codes.length && !countries_codes.includes(item.user.countryCode)) {
-        return false;
+    const itemCountry = (
+        item.user?.country_code || 
+        item.user?.countryCode ||
+        item.user?.country_iso_code || 
+        item.country_code || 
+        item.country_title || 
+        ""
+    ).toLowerCase().trim();
+
+    // ONLY filter out if we have a KNOWN country AND it matches a blacklisted country
+    if (itemCountry) {
+        const blacklisted = (process.env.BLACKLISTED_COUNTRIES_CODES || "")
+            .toLowerCase()
+            .split(",")
+            .map(s => s.trim())
+            .filter(Boolean);
+
+        if (blacklisted.length > 0 && blacklisted.includes(itemCountry)) {
+            countryAllowed = false;
+        }
     }
 
     const lowerCaseItem = {
-        title: item.title.toLowerCase(),
-        description: item.description.toLowerCase(),
-        brand: item.brand.toLowerCase()
+        title: (item.title || '').toLowerCase(),
+        description: (item.description || '').toLowerCase(),
+        brand: (item.brand || '').toLowerCase()
     };
 
-    // make sure the bannedKeywords is an array of lowercase strings
-    bannedKeywords = bannedKeywords.map(keyword => keyword.toLowerCase());
+    const cleanBannedKeywords = (bannedKeywords || []).map(keyword => keyword.toLowerCase());
+    const isBannedKeywordFree = !cleanBannedKeywords.some(keyword =>
+        keyword && (lowerCaseItem.title.includes(keyword) || lowerCaseItem.description.includes(keyword))
+    );
 
-    // check for banned keywords in the title and description
-    if (bannedKeywords.some(keyword => lowerCaseItem.title.includes(keyword) || lowerCaseItem.description.includes(keyword))) {
-        return false;
-    }
-
-    // Fuzzy search options
-    const fuseOptions = {
-        includeScore: true,
-        threshold: 0.4,  // Adjust this value for fuzzy tolerance (lower is stricter, higher is more lenient)
-        keys: ['title', 'description', 'brand']
-    };
-
-    // sanitize the search text
-    if (searchParams.search_text && searchParams.search_text.length > 0 && searchParams.search_text !== " ") {
-        const searchText = searchParams.search_text.toLowerCase();
+    let isSearchTextMatched = true;
+    if (searchParams.search_text && searchParams.search_text.trim().length > 0) {
+        const searchText = searchParams.search_text.toLowerCase().trim();
+        const fuseOptions = {
+            includeScore: true,
+            threshold: 0.4,
+            keys: ['title', 'description', 'brand']
+        };
         const fuse = new Fuse([lowerCaseItem], fuseOptions);
         const result = fuse.search(searchText);
+        isSearchTextMatched = result.length > 0 && result[0].score <= 0.4;
+    }
 
-        // If no result or score is too low, return false
-        if (!result.length || result[0].score > 0.4) { // You can adjust the score threshold based on your needs
-            return false;
+    // 2. Catalog Check: Server-side API query already filtered catalog, default to true if item.catalogId is missing
+    let isCatalogMatched = true;
+    const catalogList = searchParams.catalog || searchParams.catalog_ids;
+    if (Array.isArray(catalogList) && catalogList.length > 0) {
+        if (item.catalogId) {
+            const strId = String(item.catalogId);
+            isCatalogMatched = catalogList.includes(strId) || catalogList.some(catId => isSubcategory(catId, item.catalogId));
+        } else {
+            isCatalogMatched = true;
         }
     }
 
-    // Check catalog IDs — guard against null/undefined (parser returns null when param is absent)
-    if (Array.isArray(searchParams.catalog) && searchParams.catalog.length > 0) {
-        if (!searchParams.catalog.some(catalogId => isSubcategory(catalogId, item.catalogId))) {
-            return false;
+    let isPriceFromMatched = true;
+    if (searchParams.price_from !== null && searchParams.price_from !== undefined) {
+        const priceFrom = parseFloat(searchParams.price_from);
+        if (!isNaN(priceFrom)) {
+            isPriceFromMatched = item.priceNumeric >= priceFrom;
         }
     }
 
-    if (searchParams.price_from && item.priceNumeric < searchParams.price_from) {
-        return false;
-    }
-
-    if (searchParams.price_to && item.priceNumeric > searchParams.price_to) {
-        return false;
-    }
-
-    // Check other parameters
-    const searchParamsMap = new Map([
-        ['brand_ids', 'brandId'],
-        ['video_game_platform_ids', 'videoGamePlatformId'],
-        ['size_ids', 'sizeId'],
-        ['status_ids', 'statusId'],
-        ['material_ids', 'material'],
-        ['color_ids', 'colorId'],
-    ].map(([key, value]) => [key, item[value]]));
-
-    for (const [key, value] of searchParamsMap) {
-        const param = searchParams[key];
-        // Skip if the search URL didn't include this filter
-        if (!Array.isArray(param) || param.length === 0) continue;
-        // Skip if the item itself has no value for this field (null/undefined)
-        if (value == null) continue;
-        if (!param.includes(value.toString())) {
-            return false;
+    let isPriceToMatched = true;
+    if (searchParams.price_to !== null && searchParams.price_to !== undefined) {
+        const priceTo = parseFloat(searchParams.price_to);
+        if (!isNaN(priceTo)) {
+            isPriceToMatched = item.priceNumeric <= priceTo;
         }
     }
 
-    // If all criteria are met, return true
-    return true;
+    const isPriceMatch = isPriceFromMatched && isPriceToMatched;
+
+    let isBrandMatch = true;
+    if (Array.isArray(searchParams.brand_ids) && searchParams.brand_ids.length > 0) {
+        isBrandMatch = item.brandId && item.brandId !== 0 ? searchParams.brand_ids.includes(item.brandId.toString()) : true;
+    }
+
+    let isSizeMatch = true;
+    if (Array.isArray(searchParams.size_ids) && searchParams.size_ids.length > 0) {
+        isSizeMatch = item.sizeId && item.sizeId !== 0 ? searchParams.size_ids.includes(item.sizeId.toString()) : true;
+    }
+
+    let isStatusMatch = true;
+    if (Array.isArray(searchParams.status_ids) && searchParams.status_ids.length > 0) {
+        isStatusMatch = item.statusId && item.statusId !== 0 ? searchParams.status_ids.includes(item.statusId.toString()) : true;
+    }
+
+    let isPlatformMatch = true;
+    if (Array.isArray(searchParams.video_game_platform_ids) && searchParams.video_game_platform_ids.length > 0) {
+        isPlatformMatch = item.videoGamePlatformId && item.videoGamePlatformId !== 0
+            ? searchParams.video_game_platform_ids.includes(item.videoGamePlatformId.toString())
+            : true;
+    }
+
+    const overallVerdict =
+        countryAllowed &&
+        isBannedKeywordFree &&
+        isSearchTextMatched &&
+        isCatalogMatched &&
+        isPriceMatch &&
+        isBrandMatch &&
+        isSizeMatch &&
+        isStatusMatch &&
+        isPlatformMatch;
+
+    return overallVerdict;
 }
 
-export function filterItemsByUrl(items, url, bannedKeywords, countries_codes = [], channelId = 'unknown') {
+export function filterItemsByUrl(items, url, bannedKeywords = [], countries_codes = [], channelId = 'unknown') {
     const searchParams = parseVintedSearchParams(url);
     if (!searchParams) return [];
 
-    return items.filter(item => {
-        let brandMatch = true;
-        if (Array.isArray(searchParams.brand_ids) && searchParams.brand_ids.length > 0) {
-            brandMatch = searchParams.brand_ids.includes(item.brandId?.toString());
-        }
-
-        let priceMatch = true;
-        if (searchParams.price_from && item.priceNumeric < searchParams.price_from) priceMatch = false;
-        if (searchParams.price_to && item.priceNumeric > searchParams.price_to) priceMatch = false;
-
-        const isMatch = matchVintedItemToSearchParams(item, searchParams, bannedKeywords, countries_codes);
-
-        console.log(`[FILTER DEBUG] Channel: ${channelId} | Brand match: ${brandMatch} | Price match: ${priceMatch} | Final Verdict: ${isMatch}`);
-        return isMatch;
-    });
+    return items.filter(item => matchVintedItemToSearchParams(item, searchParams, bannedKeywords, countries_codes, channelId));
 }

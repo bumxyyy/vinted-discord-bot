@@ -21,11 +21,14 @@ export async function execute(interaction) {
         await sendWaitingEmbed(interaction, t(l, 'creating-private-channel'));
 
         const discordConfig = ConfigurationManager.getDiscordConfig;
-        const guildId = discordConfig.guild_id || process.env.DISCORD_GUILD_ID;
-        const guild = interaction.guild || (guildId ? await interaction.client.guilds.fetch(guildId).catch(() => null) : null);
+        const targetGuildId = interaction.guildId || discordConfig.guild_id || process.env.DISCORD_GUILD_ID;
+        const guild = interaction.guild 
+            || (interaction.client ? interaction.client.guilds.cache.get(targetGuildId) : null)
+            || (targetGuildId ? await interaction.client.guilds.fetch(targetGuildId).catch(() => null) : null);
 
         if (!guild || !guild.channels) {
-            throw new Error("Could not resolve Discord Guild or Guild channels manager.");
+            await sendErrorEmbed(interaction, "Errore: Impossibile trovare il server.");
+            return;
         }
 
         const baseCategoryName = 'Private Channels';
@@ -49,7 +52,7 @@ export async function execute(interaction) {
         }
 
         // Find or create an appropriate category
-        let category = await findOrCreateCategory(guild.channels, baseCategoryName);
+        let category = await findOrCreateCategory(guild, baseCategoryName);
 
         // Create the private channel
         const privateChannel = await createPrivateThread(category, channelName, discordId);
@@ -88,8 +91,12 @@ export async function execute(interaction) {
     }
 }
 
-async function findOrCreateCategory(channels, baseCategoryName) {
-    // Find categories that match the base name and include a number suffix if needed
+async function findOrCreateCategory(guildOrChannels, baseCategoryName) {
+    const channels = guildOrChannels?.channels || guildOrChannels;
+    if (!channels || typeof channels.create !== 'function') {
+        throw new Error("Errore: Impossibile risolvere la gestione dei canali del server.");
+    }
+
     let categoryNumber = 1;
     let currentCategory;
 
@@ -100,7 +107,7 @@ async function findOrCreateCategory(channels, baseCategoryName) {
         );
 
         // If the category is found but has fewer than 40 channels, use it
-        if (currentCategory && currentCategory.children.cache.size < 40) {
+        if (currentCategory && currentCategory.children?.cache?.size < 40) {
             return currentCategory;
         }
 

@@ -1,527 +1,306 @@
 import Logger from "../utils/logger.js";
 import { fetchCatalogItems } from "../api/fetchCatalogItems.js";
 import { fetchItem } from "../api/fetchItem.js";
-import vintedScraper from "./vinted_scraper.js";
+import vintedScraper, { VintedScraper } from "./vinted_scraper.js";
 import { VintedItem } from "../entities/vinted_item.js";
-import { filterItemsByUrl } from "./url_service.js";
+import { filterItemsByUrl, parseVintedSearchParams } from "./url_service.js";
 import { Preference } from "../database.js";
 import crud from "../crud.js";
 import { createVintedItemEmbed, createVintedItemActionRow } from "../bot/components/item_embed.js";
+import axios from "axios";
 
 /**
- * Manage concurrency and fetching logic.
+ * High-Speed 2-Worker Staggered Pipeline State.
  */
-const activePromises = new Set();
-let consecutiveErrors = 0;
-let rateLimitErrorsPerSecond = 0;
-
-let step = 1;
-
-let lastValidItemsPerSecond = 0;
-let validItemsPerSecond = 0;
-
-let lastRequestPerSecond = 0;
-let requestPerSecond = 0;
-
-let lastPublishedTime = Date.now();
-let idTimeSinceLastPublication = 0;
-
-let minFetchedRange = 0;
-let maxFetchedRange = 0;
-
-let currentID = 0;
-
-let concurrency = 0;
-
 let isMonitoringLoopRunning = false;
-
-function initializeConcurrency( concurrent_requests ) {
-    concurrency = concurrent_requests
-    computedConcurrency = concurrency;
-}
-
-/**
- * Explicitly trigger / ensure live background monitoring loop.
- * @param {Client} discordClient - The Discord client instance.
- */
-async function startMonitoring(discordClient) {
-    if (isMonitoringLoopRunning) {
-        console.log('[MONITOR] startMonitoring called — background worker loop is already active.');
-        return;
-    }
-    isMonitoringLoopRunning = true;
-    console.log('[MONITOR DEBUG] startMonitoring() function entered.');
-    console.log('[MONITOR] Starting continuous background polling worker loop...');
-
-    (async () => {
-        while (isMonitoringLoopRunning) {
-            try {
-                const activeChannels = await crud.getAllMonitoredVintedChannels();
-                console.log(`[POLLING TICK] Polling Vinted catalog for ${activeChannels.length} active channels...`);
-
-                if (!activeChannels || activeChannels.length === 0) {
-                    console.warn('[MONITOR DEBUG] Aborting tick: No monitored channels found in MongoDB.');
-                } else {
-                    const response = await vintedScraper.fetchCatalogItems({ per_page: 20, order: 'newest_first' });
-                    const rawItems = response?.data?.items || response?.data?.data || (Array.isArray(response?.data) ? response.data : []);
-
-                    if (Array.isArray(rawItems) && rawItems.length > 0) {
-                        for (const rawItem of rawItems) {
-                            const item = new VintedItem(rawItem);
-                            if (!item.user) continue;
-
-                            const isNew = processDeduplication(item.id);
-                            if (!isNew) continue;
-
-                            console.log(`[FILTER DEBUG] Checking item ${item.id} against ${activeChannels.length} active channel(s)`);
-
-                            for (const vintedChannel of activeChannels) {
-                                try {
-                                    const matchingItems = filterItemsByUrl(
-                                        [item],
-                                        vintedChannel.url,
-                                        vintedChannel.bannedKeywords,
-                                        vintedChannel.preferences?.get?.(Preference.Countries) || [],
-                                        vintedChannel.channelId
-                                    );
-
-                                    if (matchingItems.length > 0 && discordClient) {
-                                        const domain = vintedChannel.url?.match(/vinted\.(.*?)\//)?.[1] || 'it';
-                                        const { embed, photosEmbeds } = await createVintedItemEmbed(item, domain);
-                                        const actionRow = await createVintedItemActionRow(item, domain);
-
-                                        console.log(`[DISCORD DEBUG] Attempting to send message to Channel ID: ${vintedChannel.channelId}`);
-                                        const channelObj = await discordClient.channels.fetch(vintedChannel.channelId).catch(() => null);
-
-                                        if (channelObj) {
-                                            const doMentionUser = vintedChannel.user && vintedChannel.preferences?.get?.(Preference.Mention);
-                                            const mentionString = doMentionUser ? `<@${vintedChannel.user.discordId}> ` : '';
-                                            await channelObj.send({
-                                                content: mentionString,
-                                                embeds: [embed, ...photosEmbeds],
-                                                components: [actionRow]
-                                            });
-                                            console.log(`[DISCORD DEBUG] Successfully sent message to Channel ID: ${vintedChannel.channelId}`);
-                                        } else {
-                                            console.error(`[DISCORD DEBUG ERROR] Failed to send to ${vintedChannel.channelId}: Channel object not found on Discord client.`);
-                                        }
-                                    }
-                                } catch (err) {
-                                    console.error(`[DISCORD DEBUG ERROR] Failed to send to ${vintedChannel.channelId}:`, err.message, err.stack);
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (error) {
-                console.error(`[POLLING ERROR] Error during polling tick: ${error.message}`);
-            }
-
-            // Sleep 2.5 seconds between polling ticks
-            await delay(2500);
-        }
-    })();
-}
-
-/**
- * Local seen items cache for deduplication and memory management.
- */
+let discordClient = null;
+let highestId = 0;
+let currentID = 0;
 const localSeen = new Set();
 let isFirstScan = true;
 
+const sellerCache = new Map();
+
+// Independent VintedScraper instances per worker for isolated session/403 recovery
+const worker1Scraper = new VintedScraper();
+const worker2Scraper = new VintedScraper();
+
+async function fetchSellerDetails(userId, domain = 'it', scraper = vintedScraper) {
+    if (!userId) return null;
+    if (sellerCache.has(userId)) {
+        return sellerCache.get(userId);
+    }
+    try {
+        const response = await scraper.fetchUser(userId, domain);
+        if (response && response.success && response.data?.user) {
+            const userData = response.data.user;
+            sellerCache.set(userId, userData);
+            if (sellerCache.size > 2000) {
+                const oldestKeys = Array.from(sellerCache.keys()).slice(0, 500);
+                for (const k of oldestKeys) sellerCache.delete(k);
+            }
+            return userData;
+        }
+    } catch (err) {
+        Logger.debug(`[SELLER FETCH ERROR] Could not fetch user ${userId} on ${domain}: ${err.message}`);
+    }
+    return null;
+}
+
+function initializeConcurrency() {
+    // Legacy stub for backwards compatibility
+}
+
 /**
- * Handle deduplication and startup muting.
- * Returns true if item is new and should trigger notification, false if skipped.
+ * Initialize highest ID directly from Vinted catalog API.
+ */
+async function initializeHighestID() {
+    let attempt = 0;
+    while (attempt < 2) {
+        attempt++;
+        try {
+            const response = await vintedScraper.fetchCatalogItems({ order: 'newest_first', per_page: 1 });
+            const items = response?.data?.items || response?.data?.data || (Array.isArray(response?.data) ? response.data : []);
+
+            if (Array.isArray(items) && items.length > 0) {
+                const rawId = items[0].id || items[0].item_id;
+                if (rawId) {
+                    highestId = parseInt(rawId, 10);
+                    currentID = highestId;
+                    return highestId;
+                }
+            }
+        } catch (error) {
+            Logger.warn(`initializeHighestID attempt ${attempt} failed: ${error.message}`);
+        }
+
+        if (attempt < 2) {
+            await vintedScraper.warmUp().catch(() => {});
+        }
+    }
+    return 0;
+}
+
+/**
+ * Process single channel catalog query for a worker tick.
+ */
+async function processChannelQuery(vintedChannel, scraper) {
+    try {
+        const urlObj = new URL(vintedChannel.url);
+        const rawSearchParams = urlObj.searchParams;
+        const domain = urlObj.hostname.match(/vinted\.(.*?)$/)?.[1] || 'fr';
+
+        const queryOptions = {
+            domain,
+            rawSearchParams,
+            order: 'newest_first',
+            per_page: 10,
+            search_text: rawSearchParams.get('search_text') || undefined,
+            price_from: rawSearchParams.get('price_from') || undefined,
+            price_to: rawSearchParams.get('price_to') || undefined,
+            catalog_ids: rawSearchParams.getAll('catalog_ids[]').concat(rawSearchParams.getAll('catalog[]')),
+            brand_ids: rawSearchParams.getAll('brand_ids[]'),
+            video_game_platform_ids: rawSearchParams.getAll('video_game_platform_ids[]'),
+            size_ids: rawSearchParams.getAll('size_ids[]'),
+            status_ids: rawSearchParams.getAll('status_ids[]'),
+            color_ids: rawSearchParams.getAll('color_ids[]'),
+            material_ids: rawSearchParams.getAll('material_ids[]')
+        };
+
+        const response = await scraper.fetchCatalogItems(queryOptions);
+        const rawItems = response?.data?.items || response?.data?.data || (Array.isArray(response?.data) ? response.data : []);
+
+        if (!Array.isArray(rawItems) || rawItems.length === 0) return;
+
+        // Fast in-memory check
+        const newestItemId = rawItems[0].id;
+        if (localSeen.has(newestItemId) && !isFirstScan) {
+            return;
+        }
+
+        const parsedItems = rawItems.map(raw => new VintedItem(raw)).filter(i => i && i.user);
+
+        const matchingItems = filterItemsByUrl(
+            parsedItems,
+            vintedChannel.url,
+            vintedChannel.bannedKeywords || [],
+            vintedChannel.preferences?.get?.(Preference.Countries) || [],
+            vintedChannel.channelId
+        );
+
+        for (const item of matchingItems) {
+            const isNew = processDeduplication(item.id);
+            if (!isNew) continue;
+
+            if (item.id > highestId) {
+                highestId = item.id;
+                currentID = highestId;
+            }
+
+            console.log(`[MATCH FOUND] Item ${item.id} ("${item.title}") matched Channel ${vintedChannel.channelId}! Dispatching embed...`);
+
+            const sellerId = item.user?.id || item.userId;
+            const isSellerCached = sellerCache.has(sellerId);
+
+            if (isSellerCached && item.user) {
+                const cachedSeller = sellerCache.get(sellerId);
+                item.user = { ...item.user, ...cachedSeller };
+            }
+
+            if (discordClient) {
+                const { embed, photosEmbeds } = await createVintedItemEmbed(item, domain, vintedChannel);
+                const actionRow = await createVintedItemActionRow(item, domain);
+
+                const doMentionUser = vintedChannel.user && vintedChannel.preferences?.get?.(Preference.Mention);
+                const mentionString = doMentionUser ? `<@${vintedChannel.user.discordId}> ` : '';
+
+                const embedsPayload = [embed.toJSON(), ...photosEmbeds.map(p => p.toJSON())];
+                const componentsPayload = [actionRow.toJSON()];
+
+                let sentViaWebhook = false;
+
+                // 1. Fast Webhook Dispatch (~40ms)
+                if (vintedChannel.webhookUrl) {
+                    try {
+                        await axios.post(vintedChannel.webhookUrl, {
+                            content: mentionString,
+                            embeds: embedsPayload,
+                            components: componentsPayload
+                        });
+                        sentViaWebhook = true;
+                        console.log(`[DISCORD SUCCESS] Sent item to channel ${vintedChannel.channelId} via webhook`);
+                    } catch (webhookErr) {
+                        Logger.warn(`[WEBHOOK WARNING] Webhook post failed for channel ${vintedChannel.channelId} (${webhookErr.message}). Falling back to standard message.`);
+                    }
+                }
+
+                // 2. Standard Channel Send Fallback
+                if (!sentViaWebhook) {
+                    try {
+                        const channelObj = await discordClient.channels.fetch(vintedChannel.channelId);
+                        if (channelObj && typeof channelObj.send === 'function') {
+                            const sentMessage = await channelObj.send({
+                                content: mentionString,
+                                embeds: [embed, ...photosEmbeds],
+                                components: [actionRow]
+                            });
+                            console.log(`[DISCORD SUCCESS] Sent item to channel ${vintedChannel.channelId}`);
+
+                            if (!isSellerCached && sellerId && sentMessage) {
+                                (async () => {
+                                    const sellerData = await fetchSellerDetails(sellerId, domain, scraper);
+                                    if (sellerData && item.user) {
+                                        item.user = { ...item.user, ...sellerData };
+                                        const { embed: updatedEmbed, photosEmbeds: updatedPhotos } = await createVintedItemEmbed(item, domain, vintedChannel);
+                                        await sentMessage.edit({
+                                            embeds: [updatedEmbed, ...updatedPhotos]
+                                        }).catch(err => Logger.debug(`[DISCORD EDIT ERROR] Failed to edit message ${sentMessage.id}: ${err.message}`));
+                                    }
+                                })();
+                            }
+                        }
+                    } catch (err) {
+                        console.error(`[DISCORD ERROR] Could not fetch or send to Channel ${vintedChannel.channelId}:`, err.message);
+                    }
+                }
+            }
+        }
+    } catch (channelErr) {
+        console.error(`[POLLING ERROR] Failed query for channel ${vintedChannel.channelId}: ${channelErr.message}`);
+    }
+}
+
+/**
+ * Worker polling loop with staggered offset.
+ */
+async function runWorker(workerId, scraper, initialOffsetMs) {
+    if (initialOffsetMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, initialOffsetMs));
+    }
+
+    while (isMonitoringLoopRunning) {
+        try {
+            const activeChannels = await crud.getAllMonitoredVintedChannels();
+            if (activeChannels && activeChannels.length > 0) {
+                for (const vintedChannel of activeChannels) {
+                    await processChannelQuery(vintedChannel, scraper);
+                }
+            }
+        } catch (err) {
+            Logger.error(`[WORKER ${workerId} ERROR]: ${err.message}`);
+        }
+
+        // Each worker executes every 600ms; staggered by 300ms offset produces effective 300ms polling rate
+        await new Promise(resolve => setTimeout(resolve, 600));
+    }
+}
+
+/**
+ * Explicitly trigger / ensure live background monitoring loop (2-Worker Staggered Pipeline).
+ */
+async function startMonitoring(client) {
+    if (client) discordClient = client;
+
+    if (isMonitoringLoopRunning) {
+        return;
+    }
+    isMonitoringLoopRunning = true;
+    console.log('[MONITOR] Starting continuous background polling (2-Worker Staggered Pipeline)...');
+
+    if (highestId === 0) {
+        await initializeHighestID();
+    }
+
+    if (isFirstScan) {
+        isFirstScan = false;
+    }
+
+    // Launch Worker 1 (0ms offset) & Worker 2 (300ms offset)
+    runWorker(1, worker1Scraper, 0);
+    runWorker(2, worker2Scraper, 300);
+}
+
+/**
+ * Deduplication helper.
  */
 function processDeduplication(itemId) {
     if (isFirstScan) {
         localSeen.add(itemId);
-        console.log(`[DEDUPE DEBUG] Startup Mute: Seeding item ${itemId} into localSeen (notification muted).`);
         return false;
     }
 
     if (localSeen.has(itemId)) {
-        console.log(`[DEDUPE DEBUG] Skipping item ${itemId} (Already seen in localSeen cache).`);
         return false;
     }
 
     localSeen.add(itemId);
 
-    // Memory cleanup: limit localSeen cache size to 2000 items max to prevent leaks
     if (localSeen.size > 2000) {
         const toDelete = Array.from(localSeen).slice(0, 500);
         for (const id of toDelete) {
             localSeen.delete(id);
         }
-        Logger.debug(`[DEDUPE DEBUG] Cleaned 500 oldest items from localSeen cache (New size: ${localSeen.size})`);
     }
 
     return true;
 }
 
-/**
- * Find the highest item ID in the catalog.
- *
- * @param {string} cookie - Cookie for authentication.
- * @returns {Promise<{highestID: number}>}
- */
-async function findHighestID(cookie) {
-    const response = await fetchCatalogItems({ cookie, per_page: 20, order: 'newest_first' });
-
-    // response is the executeWithDetailedHandling envelope: { success, code, items }
-    const items = response?.items;
-
-    if (!Array.isArray(items) || items.length === 0) {
-        // Log what we actually got to help diagnose API shape changes
-        const keys = response ? Object.keys(response).join(', ') : 'null';
-        throw new Error(`findHighestID: no items in response (envelope keys: ${keys})`);
-    }
-
-    // Seed all items from initial scan into localSeen (startup mute)
-    for (const item of items) {
-        const itemId = item.id || item.item_id;
-        if (itemId) {
-            processDeduplication(itemId);
-        }
-    }
-
-    // Vinted uses 'id' in most responses; guard against 'item_id' variants
-    const rawId = items[0].id ?? items[0].item_id;
-    if (!rawId) {
-        const itemKeys = Object.keys(items[0]).join(', ');
-        throw new Error(`findHighestID: item has no id field (item keys: ${itemKeys})`);
-    }
-
-    const highestID = parseInt(rawId, 10);
-    if (isNaN(highestID) || highestID <= 0) {
-        throw new Error(`findHighestID: parsed ID is invalid: ${rawId}`);
-    }
-
-    return { highestID };
+async function findHighestID() {
+    const id = await initializeHighestID();
+    return { highestID: id };
 }
 
-/**
- * Log current status at regular intervals.
- */
-setInterval(() => {
-    const totalRequests = requestPerSecond + rateLimitErrorsPerSecond;
-    const requestSuccessRate = totalRequests ? ((requestPerSecond / totalRequests) * 100).toFixed(2) : 0;
-
-    Logger.debug(`Requests per second: ${requestPerSecond}, Step: ${step}, Consecutive errors: ${consecutiveErrors}, Rate limit errors per second: ${rateLimitErrorsPerSecond}, Valid items per second: ${validItemsPerSecond}`);
-    Logger.debug(`Active promises: ${activePromises.size}`);
-    Logger.debug(`Current ID: ${currentID}, Last published time: ${lastPublishedTime}, ID time since last publication: ${idTimeSinceLastPublication}`);
-    const numberOfItemBetweenRange = maxFetchedRange - minFetchedRange;
-    Logger.debug(`minFetchedRange: ${minFetchedRange}, maxFetchedRange: ${maxFetchedRange}, numberOfItemBetweenRange: ${numberOfItemBetweenRange}`);
-    Logger.debug(`Request success rate: ${requestSuccessRate}%`);
-    Logger.debug(`Concurrency: ${computedConcurrency}`);
-
-    rateLimitErrorsPerSecond = 0;
-
-    lastValidItemsPerSecond = validItemsPerSecond;
-    validItemsPerSecond = 0;
-
-    lastRequestPerSecond = requestPerSecond;
-    requestPerSecond = 0;
-
-    minFetchedRange = 99999999999;
-    maxFetchedRange = 0;
-}, 1000);
-/**
- * Adjust the concurrency dynamically based on errors and time since last publication.
- */
-let computedConcurrency = 2;
-
-setInterval(() => {
-    //adjustConcurrency();
-    adjustStep();
-}, 10);
-
-/**
- * Fetch items until the current item is reached automatically.
- *
- * This function fetches items until the current item is reached automatically.
- * It takes two parameters:
- * - cookie: a string representing the cookie for authentication.
- * - callback: a function to handle fetched items.
- *
- * @param {string} cookie - Cookie for authentication.
- * @param {function} callback - Callback function to handle fetched items.
- */
-async function fetchUntilCurrentAutomatic(cookie, callback) {
-    // Check if the cookie is provided
-    if (!cookie) {
-        throw new Error("Cookie is required.");
-    }
-
-    // Check if there are more than 3 rate limit errors per second
-    /*if (rateLimitErrorsPerSecond > 3) {
-        // Delay the function execution by 3 seconds
-        await delay(3000);
-        return;
-    }*/
-
-    while ( activePromises.size < computedConcurrency ) {
-        // Calculate the ID for the next item to fetch
-        const id = currentID + step;
-        currentID = id;
-
-        // Launch the fetch for the calculated ID
-        launchFetch(id, cookie, callback);
-    }
-
-    // Wait for the first promise in the set to resolve
-    await Promise.race(activePromises);
-
-    // Wait for the Promise to resolve
-    await Promise.resolve();
+function stopMonitoring() {
+    isMonitoringLoopRunning = false;
+    console.log('[MONITOR] Background polling workers stopped.');
 }
 
-/**
- * Adjust the fetching step based on time since last publication and consecutive errors.
- *
- * The step is adjusted based on the time since the last publication and the number of consecutive errors.
- * The step is changed gradually to avoid overwhelming the server with requests.
- * The step is also reduced if there are consecutive errors.
- */
-function adjustStep() {
-    // Calculate the time since the last publication
-    const timeSinceLastPublication = Date.now() - lastPublishedTime;
-
-    // Reduce the step if there are consecutive errors
-    if (consecutiveErrors > 5) {
-        step = -1;
-        return;
-    }
-
-    // Set the initial step value
-    if (step < 1) {
-        step = 1;
-    }
-
-    // Adjust the step based on the time since last publication
-    if (timeSinceLastPublication > 20000) {
-        // If it's been longer than 20 seconds since the last publication, double the step and add 10
-        step = Math.min(step * 2 + 10, 20);
-    } else if (timeSinceLastPublication > 10000) {
-        // If it's been longer than 10 seconds since the last publication, double the step and add 5
-        step = 1 
-    }
-    
-    // Ensure the step is a whole number
-    step = Math.ceil(step);
-}
-
-/**
- * Launch a fetch operation for a specific item ID.
- *
- * @param {number} id - Item ID to fetch.
- * @param {string} cookie - Cookie for authentication.
- * @param {function} callback - Callback function to handle fetched items.
- * @returns {Promise<void>} - Promise resolving when fetch operation is complete.
- */
-async function launchFetch(id, cookie, callback) {
-    // Increment the count of requests per second
-    requestPerSecond++;
-
-    // Create a promise to fetch and handle the item
-    const fetchPromise = fetchAndHandleItemSafe(cookie, id, callback);
-
-    // Add the promise to the set of active promises
-    activePromises.add(fetchPromise);
-
-    // Wait for the promise to complete and remove it from the set of active promises
-    await fetchPromise.finally(() => {
-        activePromises.delete(fetchPromise);
-    });
-}
-
-/**
- * Fetch and handle a specific item safely.
- *
- * @param {string} cookie - Cookie for authentication.
- * @param {number} itemID - Item ID to fetch.
- * @param {function} callback - Callback function to handle fetched items.
- * @returns {Promise<void>} - Promise resolving when item is handled.
- */
-async function fetchAndHandleItemSafe(cookie, itemID, callback) {
-    // Fetch the item with the given ID and cookie
-    const response = await fetchItem({ cookie, item_id: itemID });
-
-    // If the item was successfully fetched
-    if (response.item) {
-        const fetchedId = response.item.id || itemID;
-        const highestId = idTimeSinceLastPublication || currentID;
-
-        const isNewItem = processDeduplication(fetchedId);
-
-        if (isNewItem) {
-            console.log(`[MONITOR DEBUG] Highest recorded ID: ${highestId}, Current item ID: ${fetchedId}`);
-            // Call the callback function with the fetched item
-            callback(response.item);
-        }
-
-        // Increment the valid items per second counter
-        validItemsPerSecond++;
-
-        // If the item ID is greater than or equal to the ID time since last publication
-        if (itemID >= idTimeSinceLastPublication) {
-            // Update the ID time since last publication and the last published time
-            idTimeSinceLastPublication = itemID;
-            lastPublishedTime = new Date(response.item.updated_at_ts).getTime();
-        }
-
-        // Reset the consecutive errors counter
-        consecutiveErrors -= 1;
-        if (consecutiveErrors < 0) {
-            consecutiveErrors = 0;
-        }
-
-        if (consecutiveErrors > 5) {
-            consecutiveErrors = 6;
-        }
-
-
-        // Update the fetched item ID range
-        updateFetchedRange(itemID);
-    } 
-    // If the item was not found (404 error)
-    else if (response.code === 404) {
-        // Increment the consecutive errors counter
-        consecutiveErrors++;
-    } 
-    // If a rate limit error occurred (429 error)
-    else if (response.code === 429) {
-        // Increment the rate limit errors per second counter and log the error
-        rateLimitErrorsPerSecond++;
-        Logger.debug(`Rate limit error: ${rateLimitErrorsPerSecond}`);
-    } else {
-        consecutiveErrors++;
-    }
-
-    // Return a resolved promise
-    return Promise.resolve();
-}
-
-/**
- * Update the fetched item ID range.
- *
- * @param {number} itemID - The ID of the item to update the range with.
- */
-function updateFetchedRange(itemID) {
-    /**
-     * If the item ID is lower than the current minimum fetched range, update the minimum fetched range.
-     */
-    if (itemID < minFetchedRange) {
-        minFetchedRange = itemID;
-    }
-
-    /**
-     * If the item ID is higher than the current maximum fetched range, update the maximum fetched range.
-     */
-    if (itemID > maxFetchedRange) {
-        maxFetchedRange = itemID;
-    }
-}
-
-/**
- * Adjust the concurrency dynamically based on recent errors and successes.
- *
- * The computedConcurrency is adjusted based on the following criteria:
- * - If there have been more than 5 consecutive errors, the computedConcurrency is decreased by 1,
- *   with a minimum of 2.
- * - If there have been no valid items per second for the last 1 second and no valid items per second in
- *   the past, the computedConcurrency is decreased by 1, with a minimum of 2.
- * - If more than 6 seconds have passed since the last valid item was published, the computedConcurrency
- *   is increased by 1, with a maximum of the initial concurrency.
- * - If less than 1 second has passed since the last valid item was published, the computedConcurrency
- *   is decreased by 1, with a minimum of 2.
- */
-/*function adjustConcurrency() {
-    // Decrease computedConcurrency if there have been more than 5 consecutive errors
-    if (consecutiveErrors > 5) {
-        if (computedConcurrency > 10) {
-            computedConcurrency = 10;
-        }
-        
-        computedConcurrency = Math.max(computedConcurrency - 1, 2);
-    } else {
-        // Increase computedConcurrency if more than 6 seconds have passed since the last valid item was published
-        const timeSinceLastPublication = Date.now() - lastPublishedTime;
-        if (timeSinceLastPublication > 5000) {
-            computedConcurrency = Math.min(computedConcurrency + 1, concurrency);
-        }
-        
-        // Decrease computedConcurrency if less than 1 second has passed since the last valid item was published
-        if (timeSinceLastPublication < 1500) {
-            computedConcurrency = Math.max(computedConcurrency - 1, 2);
-        }
-    }
-
-    // Decrease computedConcurrency if there have been no valid items per second for the last 1 second
-    // and no valid items per second in the past
-    if (lastValidItemsPerSecond === 0 && validItemsPerSecond === 0) {
-        computedConcurrency = Math.max(computedConcurrency - 1, 2);
-    }
-
-    // Make sure computedConcurrency is not below 2
-    computedConcurrency = Math.max(computedConcurrency, 2);
-    // Make sure computedConcurrency is not above the initial concurrency
-    computedConcurrency = Math.min(computedConcurrency, concurrency);
-}*/
-
-
-/**
- * Find the highest item ID, retrying up to MAX_ATTEMPTS times with backoff.
- * If all attempts fail, currentID is left at 0 so the monitoring loop can
- * start from the current moment rather than blocking the entire bot forever.
- *
- * @param {string} cookie - Cookie for authentication.
- * @returns {Promise<void>}
- */
-async function findHighestIDUntilSuccessful(cookie) {
-    const MAX_ATTEMPTS = 10;
-    const RETRY_DELAY_MS = 3000;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        try {
-            const response = await findHighestID(cookie);
-
-            if (response.highestID && response.highestID > 0) {
-                currentID = response.highestID;
-                Logger.info(`Highest item ID found: ${currentID} (attempt ${attempt}/${MAX_ATTEMPTS})`);
-                return; // success
-            }
-
-            Logger.warn(`findHighestIDUntilSuccessful: attempt ${attempt}/${MAX_ATTEMPTS} — ID was 0 or missing.`);
-        } catch (error) {
-            Logger.error(`findHighestIDUntilSuccessful: attempt ${attempt}/${MAX_ATTEMPTS} failed — ${error.message}`);
-        }
-
-        if (attempt < MAX_ATTEMPTS) {
-            Logger.debug(`Retrying highest ID in ${RETRY_DELAY_MS / 1000}s...`);
-            await delay(RETRY_DELAY_MS);
-        }
-    }
-
-    // Fallback: start from 0 so the monitoring loop isn't permanently blocked
-    Logger.warn(`findHighestIDUntilSuccessful: all ${MAX_ATTEMPTS} attempts failed. Starting monitor from ID 0 (will pick up live items as they appear).`);
-    currentID = 0;
-}
-
-/**
- * Delay execution for a specified duration.
- * @param {number} ms - Duration in milliseconds.
- * @returns {Promise<void>} - Promise resolving after the delay.
- */
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-const CatalogService = {
+const catalogService = {
     initializeConcurrency,
-    fetchUntilCurrentAutomatic,
-    findHighestIDUntilSuccessful,
+    findHighestID,
     startMonitoring,
+    stopMonitoring,
+    initializeHighestID
 };
 
-export default CatalogService;
+export default catalogService;

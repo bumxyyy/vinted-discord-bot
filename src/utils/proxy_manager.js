@@ -16,36 +16,67 @@ class ProxyManager {
     static currentProxyIndex = 0;
     static proxiesOnCooldown = [];
 
-    static async init(maxRetries = 99, retryDelay = 5000) {
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-            try {
-                if (proxy_settings.use_webshare) {
-                    this.proxies = await listProxies(proxy_settings.webshare_api_key);
-                    Logger.info(`Loaded ${this.proxies.length} proxies from Webshare.`);
-                } else {
-                    // Read the proxy file
-                    const proxyFile = fs.readFileSync('proxies.txt', 'utf8');
-                    const proxyLines = proxyFile.split('\n');
+    static async init(maxRetries = 3, retryDelay = 2000) {
+        const useWebshareEnv = process.env.USE_WEBSHARE;
+        const isExplicitlyDisabled = useWebshareEnv === "0" || useWebshareEnv === 0;
+        const apiKey = proxy_settings.webshare_api_key || process.env.WEBSHARE_API_KEY;
+        const isApiKeyValid = apiKey && !apiKey.includes("YOUR_API_KEY");
 
-                    // Parse the proxy lines
-                    for (const line of proxyLines) {
-                        const parts = line.trim().split(':');
-                        if (parts.length === 4) {
-                            const proxy = new Proxy(parts[0], parts[1], parts[2], parts[3]);
-                            this.proxies.push(proxy);
-                        }
-                    }
-                    Logger.info(`Loaded ${this.proxies.length} proxies from file.`);
-                }
+        const shouldFetchWebshare = !isExplicitlyDisabled && proxy_settings.use_webshare && isApiKeyValid;
+
+        if (shouldFetchWebshare) {
+            try {
+                this.proxies = await listProxies(apiKey);
+                Logger.info(`Loaded ${this.proxies.length} proxies from Webshare.`);
                 return;
-            } catch (error) {
-                Logger.error(`Attempt ${attempt + 1} failed to initialize proxies: ${error.message}`);
-                if (attempt === maxRetries - 1) {
-                    Logger.error('Failed to initialize proxies after maximum retries');
-                    throw error;
-                }
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            } catch (webshareErr) {
+                Logger.warn(`Webshare API failed (${webshareErr.message}). Falling back to proxies.txt file...`);
             }
+        }
+
+        // Read proxies strictly from proxies.txt in root folder
+        if (fs.existsSync('proxies.txt')) {
+            const proxyFile = fs.readFileSync('proxies.txt', 'utf8');
+            const rawLines = proxyFile.split(/\r?\n/);
+
+            this.proxies = [];
+            for (const rawLine of rawLines) {
+                const line = rawLine.trim();
+                if (!line || line.startsWith('#')) continue;
+
+                if (line.startsWith('http://') || line.startsWith('https://') || line.startsWith('socks5://')) {
+                    try {
+                        const parsedUrl = new URL(line);
+                        const proxy = new Proxy(
+                            parsedUrl.hostname,
+                            parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+                            decodeURIComponent(parsedUrl.username || ''),
+                            decodeURIComponent(parsedUrl.password || ''),
+                            parsedUrl.protocol.replace(':', '')
+                        );
+                        this.proxies.push(proxy);
+                    } catch (e) {
+                        Logger.warn(`Invalid proxy URL line ignored: "${line}"`);
+                    }
+                    continue;
+                }
+
+                const parts = line.split(':');
+                if (parts.length === 4 && parts[0] && parts[1]) {
+                    const proxy = new Proxy(parts[0], parts[1], parts[2], parts[3]);
+                    this.proxies.push(proxy);
+                } else if (parts.length === 2 && parts[0] && parts[1]) {
+                    const proxy = new Proxy(parts[0], parts[1], '', '');
+                    this.proxies.push(proxy);
+                } else {
+                    Logger.warn(`Unrecognized proxy format line ignored: "${line}"`);
+                }
+            }
+            Logger.info(`Loaded ${this.proxies.length} proxies from proxies.txt`);
+            return;
+        } else {
+            Logger.warn('proxies.txt not found. No proxies loaded.');
+            return;
         }
     }
 
@@ -57,18 +88,22 @@ class ProxyManager {
     }
 
     /**
-     * Returns the next proxy in round-robin order.
+     * Returns the next proxy (supports single rotating line and multi-line round-robin).
      * @returns {Proxy|undefined}
      */
     static getNewProxy() {
-        if (this.proxies.length > 0) {
-            this.currentProxyIndex = (this.currentProxyIndex + 1) % this.proxies.length;
-            const proxy = this.proxies[this.currentProxyIndex];
-            return proxy;
+        if (this.proxies.length === 0) {
+            Logger.error('No proxies available.');
+            return undefined;
         }
 
-        Logger.error('No proxies available.');
-        return undefined;
+        if (this.proxies.length === 1) {
+            return this.proxies[0];
+        }
+
+        this.currentProxyIndex = (this.currentProxyIndex + 1) % this.proxies.length;
+        const proxy = this.proxies[this.currentProxyIndex];
+        return proxy;
     }
 
     /**

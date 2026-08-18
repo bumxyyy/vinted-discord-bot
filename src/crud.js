@@ -258,6 +258,17 @@ async function setVintedChannelKeepMessageSent(channelId, keepMessageSent) {
         await channel.save();
     }
 }
+
+async function setVintedChannelWebhookUrl(channelId, webhookUrl) {
+    const channel = await getVintedChannelById(channelId);
+    if (channel) {
+        channel.webhookUrl = webhookUrl;
+        await channel.save();
+        eventEmitter.emit('updated');
+        return channel;
+    }
+    return null;
+}
 // CRUD Operations for VintedChannel
 
 /**
@@ -502,6 +513,7 @@ const crud = {
     setVintedChannelUpdatedAtNow,
     setVintedChannelBannedKeywords,
     setVintedChannelKeepMessageSent,
+    setVintedChannelWebhookUrl,
     deleteUser,
     checkUserExists,
     setUserPreference,

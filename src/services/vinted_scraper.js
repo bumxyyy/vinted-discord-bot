@@ -15,6 +15,7 @@ class VintedScraper {
         this.csrfToken = null;
         this.anonId = null;
         this.isWarmedUp = false;
+        this.lastWarmupTime = 0;
         this.currentProxy = null;
     }
 
@@ -97,8 +98,6 @@ class VintedScraper {
             ...(agent ? { httpsAgent: agent, httpAgent: agent } : {})
         };
 
-        Logger.debug(`Executing session warmup GET to ${url}`);
-
         try {
             const response = await this.client(requestConfig);
             await this.saveResponseCookies(url, response);
@@ -128,6 +127,7 @@ class VintedScraper {
             }
 
             this.isWarmedUp = true;
+            this.lastWarmupTime = Date.now();
             Logger.info(`Warmed up Vinted session (CSRF: ${this.csrfToken ? 'Found' : 'Missing'}, AnonId: ${this.anonId ? 'Found' : 'Missing'})`);
             return true;
         } catch (error) {
@@ -143,7 +143,9 @@ class VintedScraper {
      * Ensure session is warmed up before making API requests.
      */
     async ensureWarmedUp() {
-        if (!this.isWarmedUp || !this.csrfToken) {
+        const now = Date.now();
+        const TEN_MINUTES_MS = 10 * 60 * 1000;
+        if (!this.isWarmedUp || !this.csrfToken || (now - this.lastWarmupTime > TEN_MINUTES_MS)) {
             await this.warmUp();
         }
     }
@@ -193,8 +195,8 @@ class VintedScraper {
         searchParams.append('order', params.order || 'newest_first');
         searchParams.append('per_page', (params.per_page || 20).toString());
 
-        if (params.search_text && params.search_text.trim()) {
-            searchParams.append('search_text', params.search_text.trim());
+        if (params.search_text && String(params.search_text).trim()) {
+            searchParams.append('search_text', String(params.search_text).trim());
         }
 
         if (params.page && parseInt(params.page, 10) > 1) {
@@ -212,20 +214,48 @@ class VintedScraper {
         const arrayKeys = [
             { paramName: 'catalog_ids', queryKey: 'catalog_ids[]' },
             { paramName: 'catalog', queryKey: 'catalog_ids[]' },
+            { paramName: 'catalog[]', queryKey: 'catalog_ids[]' },
+            { paramName: 'catalog_ids[]', queryKey: 'catalog_ids[]' },
             { paramName: 'brand_ids', queryKey: 'brand_ids[]' },
+            { paramName: 'brand_ids[]', queryKey: 'brand_ids[]' },
+            { paramName: 'video_game_platform_ids', queryKey: 'video_game_platform_ids[]' },
+            { paramName: 'video_game_platform_ids[]', queryKey: 'video_game_platform_ids[]' },
             { paramName: 'size_ids', queryKey: 'size_ids[]' },
+            { paramName: 'size_ids[]', queryKey: 'size_ids[]' },
             { paramName: 'color_ids', queryKey: 'color_ids[]' },
-            { paramName: 'status_ids', queryKey: 'status_ids[]' }
+            { paramName: 'color_ids[]', queryKey: 'color_ids[]' },
+            { paramName: 'status_ids', queryKey: 'status_ids[]' },
+            { paramName: 'status_ids[]', queryKey: 'status_ids[]' },
+            { paramName: 'material_ids', queryKey: 'material_ids[]' },
+            { paramName: 'material_ids[]', queryKey: 'material_ids[]' }
         ];
+
+        const processedKeys = new Set();
 
         for (const { paramName, queryKey } of arrayKeys) {
             const val = params[paramName];
-            if (val) {
+            if (val && !processedKeys.has(queryKey)) {
                 const list = Array.isArray(val) ? val : [val];
                 for (const item of list) {
                     if (item !== undefined && item !== null && item !== '') {
                         searchParams.append(queryKey, item.toString());
                     }
+                }
+                if (list.length > 0) {
+                    processedKeys.add(queryKey);
+                }
+            }
+        }
+
+        // Forward any extra raw parameters from channel searchParams
+        if (params.rawSearchParams instanceof URLSearchParams) {
+            for (const [key, value] of params.rawSearchParams.entries()) {
+                if (['order', 'per_page', 'page', 'price_from', 'price_to', 'search_text', '_'].includes(key)) continue;
+                let targetKey = key;
+                if (key === 'catalog[]' || key === 'catalog_ids') targetKey = 'catalog_ids[]';
+                const existingValues = searchParams.getAll(targetKey);
+                if (!existingValues.includes(value)) {
+                    searchParams.append(targetKey, value);
                 }
             }
         }
@@ -240,8 +270,9 @@ class VintedScraper {
     async fetchCatalogItems(params = {}) {
         await this.ensureWarmedUp();
 
+        const domain = params.domain || this.domain || 'fr';
         const queryString = this.buildCatalogQueryParams(params);
-        const url = `https://www.vinted.${this.domain}/api/v2/catalog/items?${queryString}`;
+        const url = `https://www.vinted.${domain}/api/v2/catalog/items?${queryString}`;
 
         return await this.executeApiRequestWithRecovery(url);
     }
@@ -252,6 +283,16 @@ class VintedScraper {
     async fetchItem(itemId) {
         await this.ensureWarmedUp();
         const url = `https://www.vinted.${this.domain}/api/v2/items/${itemId}?_=${Date.now()}`;
+        return await this.executeApiRequestWithRecovery(url);
+    }
+
+    /**
+     * Fetch user profile details by ID.
+     */
+    async fetchUser(userId, domain = null) {
+        await this.ensureWarmedUp();
+        const targetDomain = domain || this.domain || 'it';
+        const url = `https://www.vinted.${targetDomain}/api/v2/users/${userId}?_=${Date.now()}`;
         return await this.executeApiRequestWithRecovery(url);
     }
 
@@ -293,16 +334,15 @@ class VintedScraper {
             };
 
             try {
-                console.log(`[SCRAPER DEBUG] Requesting: ${url}`);
                 const response = await this.client(config);
                 await this.saveResponseCookies(url, response);
 
-                const items = Array.isArray(response.data?.items) ? response.data.items : (Array.isArray(response.data?.data) ? response.data.data : []);
-                console.log(`[SCRAPER DEBUG] Status: ${response.status}, Received items count: ${items.length}`);
-                if (items.length > 0) {
-                    const top = items[0];
-                    const priceVal = top.price?.amount || top.price_numeric || top.price || 'N/A';
-                    console.log(`[SCRAPER DEBUG] Top item: ID=${top.id}, Title="${top.title}", Price=${priceVal}`);
+                if (response.status === 402) {
+                    Logger.error(`[PROXY ERROR] Proxy returned HTTP 402 Payment Required (proxy bandwidth/account expired). Removing proxy.`);
+                    if (this.currentProxy) {
+                        ProxyManager.removeProxy(this.currentProxy);
+                        this.currentProxy = null;
+                    }
                 }
 
                 if (response.status === 401 || response.status === 403) {
