@@ -33,13 +33,49 @@ function initializeConcurrency( concurrent_requests ) {
 }
 
 /**
+ * Local seen items cache for deduplication and memory management.
+ */
+const localSeen = new Set();
+let isFirstScan = true;
+
+/**
+ * Handle deduplication and startup muting.
+ * Returns true if item is new and should trigger notification, false if skipped.
+ */
+function processDeduplication(itemId) {
+    if (isFirstScan) {
+        localSeen.add(itemId);
+        console.log(`[DEDUPE DEBUG] Startup Mute: Seeding item ${itemId} into localSeen (notification muted).`);
+        return false;
+    }
+
+    if (localSeen.has(itemId)) {
+        console.log(`[DEDUPE DEBUG] Skipping item ${itemId} (Already seen in localSeen cache).`);
+        return false;
+    }
+
+    localSeen.add(itemId);
+
+    // Memory cleanup: limit localSeen cache size to 2000 items max to prevent leaks
+    if (localSeen.size > 2000) {
+        const toDelete = Array.from(localSeen).slice(0, 500);
+        for (const id of toDelete) {
+            localSeen.delete(id);
+        }
+        Logger.debug(`[DEDUPE DEBUG] Cleaned 500 oldest items from localSeen cache (New size: ${localSeen.size})`);
+    }
+
+    return true;
+}
+
+/**
  * Find the highest item ID in the catalog.
  *
  * @param {string} cookie - Cookie for authentication.
  * @returns {Promise<{highestID: number}>}
  */
 async function findHighestID(cookie) {
-    const response = await fetchCatalogItems({ cookie, per_page: 1, order: 'newest_first' });
+    const response = await fetchCatalogItems({ cookie, per_page: 20, order: 'newest_first' });
 
     // response is the executeWithDetailedHandling envelope: { success, code, items }
     const items = response?.items;
@@ -48,6 +84,14 @@ async function findHighestID(cookie) {
         // Log what we actually got to help diagnose API shape changes
         const keys = response ? Object.keys(response).join(', ') : 'null';
         throw new Error(`findHighestID: no items in response (envelope keys: ${keys})`);
+    }
+
+    // Seed all items from initial scan into localSeen (startup mute)
+    for (const item of items) {
+        const itemId = item.id || item.item_id;
+        if (itemId) {
+            processDeduplication(itemId);
+        }
     }
 
     // Vinted uses 'id' in most responses; guard against 'item_id' variants
@@ -217,14 +261,13 @@ async function fetchAndHandleItemSafe(cookie, itemID, callback) {
         const fetchedId = response.item.id || itemID;
         const highestId = idTimeSinceLastPublication || currentID;
 
-        if (fetchedId <= highestId && idTimeSinceLastPublication > 0) {
-            console.log(`[MONITOR DEBUG] Skipping item ${fetchedId} (Not newer than highestId ${highestId})`);
-        } else {
-            console.log(`[MONITOR DEBUG] Highest recorded ID: ${highestId}, Current item ID: ${fetchedId}`);
-        }
+        const isNewItem = processDeduplication(fetchedId);
 
-        // Call the callback function with the fetched item
-        callback(response.item);
+        if (isNewItem) {
+            console.log(`[MONITOR DEBUG] Highest recorded ID: ${highestId}, Current item ID: ${fetchedId}`);
+            // Call the callback function with the fetched item
+            callback(response.item);
+        }
 
         // Increment the valid items per second counter
         validItemsPerSecond++;

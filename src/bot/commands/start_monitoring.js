@@ -72,16 +72,20 @@ function getDomainInUrl(url) {
 
 export async function execute(interaction) {
     const l = interaction.locale;
-    await sendWaitingEmbed(interaction, t(l, 'starting-monitoring'));
-
     const url = interaction.options.getString('url');
     const bannedKeywords = interaction.options.getString('banned_keywords') ? interaction.options.getString('banned_keywords').split(',').map(keyword => keyword.trim()) : [];
     const discordId = interaction.user.id;
     const channelId = interaction.channel.id;
 
+    console.log(`[COMMAND DEBUG] /start_monitoring triggered by User ID: ${discordId} for Channel ID: ${channelId}`);
+    console.log(`[COMMAND DEBUG] /start_monitoring URL: ${url}`);
+
+    await sendWaitingEmbed(interaction, t(l, 'starting-monitoring'));
+
     // validate the URL
     const validation = validateUrl(url);
     if (validation !== true) {
+        console.warn(`[COMMAND DEBUG] URL validation failed with code: ${validation}`);
         await sendErrorEmbed(interaction, t(l, validation));
         return;
     }
@@ -90,6 +94,7 @@ export async function execute(interaction) {
         // Get the user
         const user = await crud.getUserByDiscordId(discordId);
         if (!user) {
+            console.warn(`[COMMAND DEBUG] User not found for Discord ID: ${discordId}`);
             await sendErrorEmbed(interaction, t(l, 'user-not-found'));
             return;
         }
@@ -97,6 +102,7 @@ export async function execute(interaction) {
         // Find the VintedChannel by channelId and ensure it's owned by the user
         const vintedChannel = user.channels.find(channel => channel.channelId === channelId && channel.user.equals(user._id));
         if (!vintedChannel) {
+            console.warn(`[COMMAND DEBUG] Channel not found or not owned by user. Channel ID: ${channelId}`);
             await sendErrorEmbed(interaction, t(l, 'channel-not-found-nor-owned'));
             return;
         }
@@ -129,8 +135,9 @@ export async function execute(interaction) {
 
         // Update the VintedChannel with the provided URL (if any) and set isMonitoring to true
         await crud.startVintedChannelMonitoring(vintedChannel._id, url);
+        console.log(`[COMMAND DEBUG] Successfully started monitoring for Channel ID: ${channelId}`);
     } catch (error) {
-        console.error('Error starting monitoring session:', error);
+        console.error('[COMMAND DEBUG ERROR] Error starting monitoring session:', error.message, error.stack);
         await sendErrorEmbed(interaction, 'There was an error starting the monitoring session.');
     }
 }

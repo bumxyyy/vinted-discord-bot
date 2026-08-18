@@ -137,9 +137,17 @@ crud.eventEmitter.on('updated', async () => {
     allMonitoringChannels = await crud.getAllMonitoredVintedChannels();
     allMonitoringChannelsBrandMap = await crud.getAllMonitoredVintedChannelsBrandMap();
     Logger.debug('Updated vinted channels');
+    console.log(`[MONITOR DEBUG] Updated active channel map. Total active channels: ${allMonitoringChannels.length}`);
 });
 
 const monitorChannels = () => {
+    console.log('[MONITOR DEBUG] startMonitoring() / monitorChannels() function entered.');
+    if (!allMonitoringChannels || allMonitoringChannels.length === 0) {
+        console.warn('[MONITOR DEBUG] Warning: No monitored channels found in MongoDB at loop start.');
+    } else {
+        console.log(`[MONITOR DEBUG] Active channels count: ${allMonitoringChannels.length}`);
+    }
+
     const handleItem = async (rawItem) => {
         Logger.debug('Handling item');
         const item = new VintedItem(rawItem);
@@ -203,13 +211,16 @@ const monitorChannels = () => {
     };
 
     (async () => {
+        console.log('[MONITOR DEBUG] Initializing highest catalog ID...');
         await CatalogService.findHighestIDUntilSuccessful(cookie);
 
+        console.log('[MONITOR DEBUG] Entering continuous catalog polling loop...');
         while (true) {
             try {
                 await CatalogService.fetchUntilCurrentAutomatic(cookie, handleItem);
             } catch (error) {
                 Logger.error(`Monitoring loop error: ${error.message || error}`);
+                console.error(`[MONITOR DEBUG ERROR] Exception in monitoring loop iteration:`, error.message, error.stack);
                 // Sleep before the next iteration to prevent a tight error loop
                 // from flooding the proxy / Vinted API with dozens of requests/s.
                 await new Promise(resolve => setTimeout(resolve, 2500));

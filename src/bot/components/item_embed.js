@@ -25,56 +25,49 @@ function replaceDomainInUrl(url, domain) {
 }
 
 export async function createVintedItemEmbed(item, domain = "fr") {
-    const embed = await createBaseEmbed(
-        null,
-        item.title,
-        `📝 ${item.description}`,
-        item.getDominantColor()
-    )
+    const itemUrl = replaceDomainInUrl(item.url, domain);
+    const sellerUrl = item.user?.url ? replaceDomainInUrl(item.user.url, domain) : itemUrl;
+    const nowUnix = Math.floor(Date.now() / 1000);
 
-    embed.setURL(replaceDomainInUrl(item.url, domain));
+    const priceText = (item.totalItemPrice && item.totalItemPrice !== item.priceNumeric)
+        ? `${item.priceNumeric} ${item.currency}\n*(Total: ${item.totalItemPrice} ${item.currency})*`
+        : `${item.priceNumeric} ${item.currency}`;
 
-    const rating = item.user.feedback_reputation;
-    const ratingStars = getNumberOfStars(rating);
-    const ratingTextRounded = Math.round(rating * 50) / 10;
-    const ratingAllText = `${item.user.feedback_count}`;
+    const descriptionText = `**[View item](${itemUrl})** • **[Seller Profile](${sellerUrl})**\n\n📝 ${item.description || 'No description provided.'}`;
+
+    const embed = new EmbedBuilder()
+        .setTitle(item.title)
+        .setURL(itemUrl)
+        .setDescription(descriptionText)
+        .setColor(0x007782)
+        .setTimestamp();
 
     embed.setFields([
-        { name: '💰 Price', value: `${item.priceNumeric} ${item.currency}`, inline : true},
-        { name: '📏 Size', value: `${item.size} ` , inline : true },
-        { name: '🏷️ Brand', value: `${item.brand} ` , inline : true },
-        { name: '🌍 Country', value: `${getFlagEmoji(item.user.countryCode)} `, inline : true},
-        { name: '⭐️ User Rating', value: `${ratingStars} (${ratingTextRounded}) of ${ratingAllText}`, inline : true},
-        { name: '📦 Condition', value: `${item.status} `, inline : true },
-        { name: '📅 Updated', value: `${item.unixUpdatedAtString} `, inline : true},
+        { name: '💰 Price', value: priceText, inline: true },
+        { name: '📏 Size', value: `${item.size}`, inline: true },
+        { name: '🏷️ Brand', value: `${item.brand}`, inline: true },
+        { name: '📦 Condition', value: `${item.status}`, inline: true },
+        { name: '🌍 Country', value: item.user ? getFlagEmoji(item.user.countryCode) : 'N/A', inline: true },
+        { name: '⏰ Detected', value: `<t:${nowUnix}:R>`, inline: true },
     ]);
 
-    const photosEmbeds = []
-    const maxPhotos = 3;
+    const photosEmbeds = [];
 
     // Add first photo
     const firstPhoto = item.photos[0];
-    if (firstPhoto) {
-        if (firstPhoto.fullSizeUrl) {
-            embed.setImage(`${firstPhoto.fullSizeUrl}`);
-        } else {
-            Logger.error(`No fullSizeUrl for photo: ${firstPhoto}`);
-            return { embed, photosEmbeds };
-        }
-    } else {
-        Logger.error(`No photo for item: ${item}`);
-        return { embed, photosEmbeds };
+    if (firstPhoto && firstPhoto.fullSizeUrl) {
+        embed.setImage(firstPhoto.fullSizeUrl);
     }
 
-    // Add photos
-    for (let i = 1; i < item.photos.length && i < maxPhotos; i++) {
+    // Attach up to 2 secondary images (photos[1] and photos[2]) to create an image carousel
+    for (let i = 1; i < item.photos.length && i < 3; i++) {
         const photo = item.photos[i];
-
-        const photoEmbed = new EmbedBuilder()
-            .setImage(`${photo.fullSizeUrl}`)
-            .setURL(replaceDomainInUrl(item.url, domain));
-
-        photosEmbeds.push(photoEmbed);
+        if (photo && photo.fullSizeUrl) {
+            const photoEmbed = new EmbedBuilder()
+                .setURL(itemUrl)
+                .setImage(photo.fullSizeUrl);
+            photosEmbeds.push(photoEmbed);
+        }
     }
 
     return { embed, photosEmbeds };

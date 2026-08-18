@@ -74,13 +74,26 @@ function validateId(value) {
       this.catalogId = validateId(itemData.catalog_id);
 
       this.description = validateString(itemData.description);
-      this.size = validateString(itemData.size);
-      this.brand = validateString(itemData.brand);
+      this.size = validateString(itemData.size_title || itemData.size);
+      this.brand = validateString(itemData.brand_title || itemData.brand);
       this.composition = validateString(itemData.composition);
-      this.status = validateString(itemData.status);
+      this.status = validateString(itemData.status_title || itemData.status);
       this.label = validateString(itemData.label);
-      this.currency = validateString(itemData.currency);
-      this.priceNumeric = validateNumber(parseFloat(itemData.price_numeric));
+      this.currency = validateString(itemData.currency || itemData.price?.currency_code || itemData.price?.currency || 'EUR');
+      this.priceNumeric = validateNumber(parseFloat(itemData.price_numeric || itemData.price?.amount || itemData.price));
+
+      // Extract total_item_price (fee-inclusive) if present
+      if (itemData.total_item_price) {
+          if (typeof itemData.total_item_price === 'object') {
+              this.totalItemPrice = validateNumber(parseFloat(itemData.total_item_price.amount || itemData.total_item_price.numeric));
+          } else {
+              this.totalItemPrice = validateNumber(parseFloat(itemData.total_item_price));
+          }
+      } else if (itemData.total_item_price_numeric) {
+          this.totalItemPrice = validateNumber(parseFloat(itemData.total_item_price_numeric));
+      } else {
+          this.totalItemPrice = null;
+      }
 
       this.updatedAtTs = parseDate(itemData.updated_at_ts);
       this.colorId = validateId(itemData.color1_id);
@@ -104,9 +117,9 @@ function validateId(value) {
 
     getDominantColor() {
       if (this.photos.length === 0) {
-        return "#000000";
+        return "#007782";
       }
-      return this.photos[0].dominantColor;
+      return this.photos[0].dominantColor || "#007782";
     }
   }
   
